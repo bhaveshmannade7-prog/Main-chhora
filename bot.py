@@ -23,7 +23,7 @@ is_forwarding = False
 mode_copy = True
 PER_MSG_DELAY = 0.5 
 BATCH_SIZE_FOR_BREAK = 250
-BREAK_DURATION_SEC = 10
+BREAK_DURATION_SEC = 25 # <-- Yahaan change kar diya hai (10 se 25)
 
 # --- Database Files ---
 DUPLICATE_DB_FILE = "forwarded_unique_ids.txt"
@@ -143,7 +143,7 @@ async def resolve_chat_id(client: Client, ref: str | int):
 START_MESSAGE = """
 **🚀 Welcome, Admin! (Cleaner Bot)**
 
-**Naya Feature:** Bot ab 'File Name + File Size' ke basis par bhi duplicates check karta hai.
+**Naya Feature:** Bot ab 'File Name + File Size' ke basis par bhi duplicates check karta hai. Break time ab 25 sec hai.
 
 **Workflow:**
 1.  `/sync`
@@ -167,7 +167,7 @@ START_MESSAGE = """
 * `/start` - Yeh help message.
 
 **--- DANGER ZONE ---**
-* `/clean_dupes <chat_id>` - **(Naya)** Channel se duplicate movies ko scan karke delete karta hai. **Aapka account uss channel mein ADMIN (Delete Permission) hona chahiye.**
+* `/clean_dupes <chat_id>` - Channel se duplicate movies ko scan karke delete karta hai. **Aapka account uss channel mein ADMIN (Delete Permission) hona chahiye.**
 """
 
 @app.on_message(filters.command("start") & filters.create(only_admin))
@@ -431,11 +431,10 @@ async def clean_dupes_cmd(_, message):
                     await app.delete_messages(chat_id, batch)
                     deleted_count += len(batch)
                     await status.edit(f"🗑️ Deleting duplicates...\nBatch {i+1}/{len(batches)} done.\nTotal Deleted: {deleted_count}/{total_to_delete}")
-                    await asyncio.sleep(2) # Har batch ke baad 2 sec ka pause
+                    await asyncio.sleep(2) 
                 except FloodWait as e:
                     await status.edit(f"⏳ FloodWait: Deleting batch {i+1}...\nSleeping for {e.value}s.")
                     await asyncio.sleep(e.value)
-                    # Retry the same batch (optional, but good)
                     try:
                         await app.delete_messages(chat_id, batch)
                         deleted_count += len(batch)
@@ -615,7 +614,7 @@ async def start_forward(_, message):
                     print(f"[FORWARD ERR] Skipping deleted/invalid msg {message_id}")
                     continue
                 except RPCError as e:
-                    print(f"[FORWARD RPCError] Skipping msg {message_id}: {e}")
+                    print(f"[FORWARD RPCError] Skipping msg {message_sstartid}: {e}")
                     continue
                 except Exception as e:
                     print(f"[FORWARD ERROR] Skipping msg {message_id}: {e}")
