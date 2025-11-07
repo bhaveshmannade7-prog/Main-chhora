@@ -16,7 +16,6 @@ ADMIN_ID = int(os.getenv("ADMIN_ID"))
 app = Client("user", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
 
 # --- Runtime state ---
-# source_channel ab JSON se aayega
 target_channel = None
 limit_messages = None
 forwarded_count = 0
@@ -28,11 +27,17 @@ DUPLICATE_DB_FILE = "forwarded_unique_ids.txt" # Jo bhej diya hai
 INDEX_DB_FILE = "movie_database.json"          # Jo source me mila hai
 
 forwarded_unique_ids = set()
-movie_index = {
-    "source_channel_id": None,
-    "source_channel_name": None,
-    "movies": {} # 'unique_id': { 'message_id': 123 }
-}
+
+# Default empty state for the index
+def get_default_index():
+    return {
+        "source_channel_id": None,
+        "source_channel_name": None,
+        "movies": {} # 'unique_id': { 'message_id': 123 }
+    }
+
+movie_index = get_default_index()
+
 
 def load_forwarded_ids():
     global forwarded_unique_ids
@@ -60,6 +65,9 @@ def load_index_db():
                 movie_index = json.load(f)
         except Exception as e:
             print(f"Error loading index DB: {e}")
+            movie_index = get_default_index()
+    else:
+        movie_index = get_default_index()
 
 def save_index_db():
     try:
@@ -114,13 +122,14 @@ Yeh bot ab do stages me kaam karta hai:
 
 **Naya Workflow:**
 1.  `/sync` - (Agar zaroori ho)
-2.  `/index <source_channel_id>` - **(Naya Kadam)** Movies ko scan aur save karein.
+2.  `/index <source_channel_id>` - Movies ko scan aur save karein.
 3.  `/set_target <target_channel_id>`
 4.  `/start_forward`
 
 **Available Commands:**
 
 * `/index <chat_id>` - Source channel ko scan karke `movie_database.json` banata hai.
+* `/clear_index` - **(Naya)** Saved movie index (`.json`) ko delete karta hai.
 * `/set_target <chat_id>` - Target channel set karein.
 * `/start_forward` - JSON database se forwarding shuru karta hai.
 * `/set_limit <number>` - (Optional) Max kitni movies forward karni hain.
@@ -157,11 +166,9 @@ def index_channel_cmd(_, message):
             return
         
         # Naya index shuru karo
-        movie_index = {
-            "source_channel_id": src_id,
-            "source_channel_name": src_name,
-            "movies": {}
-        }
+        movie_index = get_default_index()
+        movie_index["source_channel_id"] = src_id
+        movie_index["source_channel_name"] = src_name
         
         status = await message.reply(f"⏳ Indexing shuru ho raha hai: `{src_name}`...\n(Stage 1: Videos)")
 
@@ -224,6 +231,21 @@ def index_channel_cmd(_, message):
 
     app.loop.create_task(runner())
 # ---------------------------------
+
+# --- Naya Command: /clear_index ---
+@app.on_message(filters.command("clear_index") & filters.create(only_admin))
+def clear_index_cmd(_, message):
+    global movie_index
+    try:
+        if os.path.exists(INDEX_DB_FILE):
+            os.remove(INDEX_DB_FILE)
+            movie_index = get_default_index()
+            message.reply(f"✅ Movie index (`{INDEX_DB_FILE}`) delete kar diya hai.")
+        else:
+            message.reply(f"ℹ️ Movie index pehle se hi khaali hai.")
+    except Exception as e:
+        message.reply(f"❌ Index delete nahi kar paaya: {e}")
+# ------------------------------------
 
 @app.on_message(filters.command("set_target") & filters.create(only_admin))
 def set_target(_, message):
@@ -350,10 +372,8 @@ def start_forward(_, message):
                     print(f"[FORWARD ERROR] Skipping msg {message_id}: {e}")
                     continue
                 
-                # --- YEH HAI CHANGE ---
-                # Ab status har 150 movies (ya 500 processed) par update hoga
+                # Status update har 150 movies (ya 500 processed) par
                 if (forwarded_count % 150 == 0) or (processed_count % 500 == 0):
-                # ---------------------
                     try:
                         await status.edit_text(
                             f"✅ Fwd: `{forwarded_count}` / {(limit_messages or '∞')}, 🔍 Dup: `{duplicate_count}`\n"
@@ -361,7 +381,7 @@ def start_forward(_, message):
                             reply_markup=STOP_BUTTON
                         )
                     except FloodWait:
-                        pass # Status update zaroori nahi hai
+                        pass 
 
                 if limit_messages and forwarded_count >= limit_messages:
                     is_forwarding = False
@@ -390,7 +410,7 @@ def stop_forward(_, message):
 @app.on_message(filters.command("status") & filters.create(only_admin))
 def status_cmd(_, message):
     total_in_fwd_db = len(forwarded_unique_ids)
-    total_in_index = len(movie_index["movies"])
+    total_in_index = len(movie_index.get('movies', {}))
     
     message.reply(
         f"📊 Status\n"
