@@ -21,9 +21,8 @@ limit_messages = None
 forwarded_count = 0     # Is session me kitne forward hue
 is_forwarding = False
 mode_copy = True
-BATCH_SIZE = 300        # <-- FIX: 100 se 300 kar diya (Optimization)
-# PER_MSG_DELAY hata diya gaya hai speed optimization ke liye.
-# Bot ab FloodWait par hi sleep karega.
+BATCH_SIZE = 100        # <-- FIX: Wapas 100 kar diya. Yeh UserBot ke liye best hai.
+# 300 karne se 21*3 = 63 sec ka wait hota hai. 100 se sirf 21 sec ka wait hoga.
 
 # --- Duplicate Check ---
 DUPLICATE_DB_FILE = "forwarded_unique_ids.txt"
@@ -224,17 +223,19 @@ def start_forward(_, message):
                 return
 
             try:
+                # 1. 100 message ka batch maangega.
+                # Isme internal 21-sec wait ho sakta hai (jaisa aapne logs me dekha).
                 batch = []
                 async for m in app.get_chat_history(src, offset_id=offset_id, limit=BATCH_SIZE):
                     batch.append(m)
                 if not batch:
                     break # History khatam
 
+                # 2. Batch ko process karega (yeh fast hoga)
                 for m in reversed(batch): # Order maintain karne ke liye
                     if not is_forwarding:
                         break # Batch ke beech me stop
                     
-                    # --- Movie Filter aur Duplicate Check ---
                     unique_id = None
                     if m.video:
                         unique_id = m.video.file_unique_id
@@ -248,7 +249,6 @@ def start_forward(_, message):
                     if unique_id in forwarded_unique_ids:
                         duplicate_count += 1
                         continue # Yeh duplicate hai
-                    # ----------------------------------------
                     
                     try:
                         if mode_copy:
@@ -258,7 +258,6 @@ def start_forward(_, message):
                         
                         save_forwarded_id(unique_id) # Success par save karo
                         forwarded_count += 1
-                        # time.sleep(PER_MSG_DELAY)  <-- YEH HATA DIYA HAI (SPEED!)
                         
                     except FloodWait as e:
                         await status.edit_text(f"⏳ FloodWait: sleeping {e.value}s…", reply_markup=STOP_BUTTON)
@@ -272,15 +271,15 @@ def start_forward(_, message):
 
                 offset_id = batch[0].id
                 
-                # Status update har 100 movie par (kyunki ab batch 300 ka hai)
-                if forwarded_count % 100 == 0 and forwarded_count > 0:
-                    await status.edit_text(
-                        f"✅ Movies Forwarded: `{forwarded_count}` / {(limit_messages or '∞')}\n"
-                        f"🔍 Duplicates Skipped: `{duplicate_count}`\n"
-                        f"🚫 Non-Movies Skipped: `{skipped_count}`\n"
-                        f"⏳ Working (Max Speed)...",
-                        reply_markup=STOP_BUTTON
-                    )
+                # 3. <-- FIX: Status message HAR BATCH ke baad update hoga
+                # Isse aapko hamesha progress dikhegi, bhale hi 0 movie mili ho.
+                await status.edit_text(
+                    f"✅ Movies Forwarded: `{forwarded_count}` / {(limit_messages or '∞')}\n"
+                    f"🔍 Duplicates Skipped: `{duplicate_count}`\n"
+                    f"🚫 Non-Movies Skipped: `{skipped_count}`\n"
+                    f"⏳ Processing... (Fetching next 100)",
+                    reply_markup=STOP_BUTTON
+                )
 
                 if limit_messages and forwarded_count >= limit_messages:
                     is_forwarding = False # Limit poora ho gaya
