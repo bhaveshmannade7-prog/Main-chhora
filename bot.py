@@ -8,8 +8,8 @@ from pyrogram.errors import FloodWait, ChatAdminRequired, InviteHashExpired, Inv
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH") # <-- FIX: Extra ')' hata diya
-SESSION_STRING = os.getenv("SESSION_STRING") # <-- FIX: Extra ')' hata diya
+API_HASH = os.getenv("API_HASH")
+SESSION_STRING = os.getenv("SESSION_STRING")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
 # Session via string (Pyrogram v2)
@@ -189,7 +189,7 @@ def index_channel_cmd(_, message):
                     try:
                         await status.edit(f"⏳ Indexing... (Stage 1)\nProcessed: {processed_stage1} videos\nFound: {found_count} unique")
                     except FloodWait:
-                        pass # Status update ko skip karo agar floodwait hai
+                        pass 
 
             await status.edit(f"⏳ Indexing... (Stage 2: Files)\nProcessed: {processed_stage1} videos\nFound: {found_count} unique")
 
@@ -283,21 +283,17 @@ def start_forward(_, message):
     async def runner():
         global forwarded_count, is_forwarding
 
-        # Check karo ki target set hai ya nahi
         if not target_channel:
             await message.reply("⚠ Pehle `/set_target` set karo.")
             return
             
-        # Check karo ki index file hai ya nahi
         if not movie_index["source_channel_id"] or not movie_index["movies"]:
             await message.reply("⚠ Movie index khaali hai. Pehle `/index <channel_id>` chalao.")
             return
 
         try:
-            # Target ko resolve karo
             tgt_chat = await resolve_chat_id(app, target_channel)
             tgt = tgt_chat.id
-            # Source ko JSON se lo
             src = movie_index["source_channel_id"]
             src_name = movie_index["source_channel_name"]
             
@@ -319,7 +315,6 @@ def start_forward(_, message):
             reply_markup=STOP_BUTTON
         )
         
-        # Ab local JSON se loop karo (bohot fast)
         movies_list = list(movie_index["movies"].items())
         
         try:
@@ -346,7 +341,6 @@ def start_forward(_, message):
                     await status.edit_text(f"⏳ FloodWait: sleeping {e.value}s…", reply_markup=STOP_BUTTON)
                     await asyncio.sleep(e.value)
                 except (MessageIdInvalid, MessageAuthorRequired):
-                    # Original message delete ho gayi, skip karo
                     print(f"[FORWARD ERR] Skipping deleted/invalid msg {message_id}")
                     continue
                 except RPCError as e:
@@ -356,7 +350,10 @@ def start_forward(_, message):
                     print(f"[FORWARD ERROR] Skipping msg {message_id}: {e}")
                     continue
                 
-                if (forwarded_count % 25 == 0) or (processed_count % 100 == 0):
+                # --- YEH HAI CHANGE ---
+                # Ab status har 150 movies (ya 500 processed) par update hoga
+                if (forwarded_count % 150 == 0) or (processed_count % 500 == 0):
+                # ---------------------
                     try:
                         await status.edit_text(
                             f"✅ Fwd: `{forwarded_count}` / {(limit_messages or '∞')}, 🔍 Dup: `{duplicate_count}`\n"
@@ -364,7 +361,7 @@ def start_forward(_, message):
                             reply_markup=STOP_BUTTON
                         )
                     except FloodWait:
-                        pass
+                        pass # Status update zaroori nahi hai
 
                 if limit_messages and forwarded_count >= limit_messages:
                     is_forwarding = False
@@ -403,7 +400,7 @@ def status_cmd(_, message):
         f"--- Session ---\n"
         f"Forwarded: `{forwarded_count}`\n"
         f"--- Databases ---\n"
-        f"Indexed Movies: `{total_in_index}` (from `{movie_index['source_channel_name']}`)\n"
+        f"Indexed Movies: `{total_in_index}` (from `{movie_index.get('source_channel_name', 'N/A')}`)\n"
         f"Forwarded Movies: `{total_in_fwd_db}` (in `{DUPLICATE_DB_FILE}`)"
     )
 
@@ -429,7 +426,7 @@ print("Loading databases...")
 load_forwarded_ids()
 load_index_db()
 print(f"Loaded {len(forwarded_unique_ids)} forwarded IDs from {DUPLICATE_DB_FILE}")
-print(f"Loaded {len(movie_index['movies'])} indexed movies from {INDEX_DB_FILE}")
+print(f"Loaded {len(movie_index.get('movies', {}))} indexed movies from {INDEX_DB_FILE}")
 
 print("✅ UserBot ready — send commands in your control group.")
 app.run()
