@@ -2,6 +2,7 @@ from keep_alive import keep_alive
 keep_alive()
 
 import os, time, re
+import asyncio  # <-- Speed/Responsiveness ke liye add kiya
 from pyrogram import Client, filters, enums
 from pyrogram.errors import FloodWait, ChatAdminRequired, InviteHashExpired, InviteHashInvalid, PeerIdInvalid, UserAlreadyParticipant, MessageIdInvalid, MessageAuthorRequired, RPCError
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -207,39 +208,48 @@ def start_forward(_, message):
         is_forwarding = True
         forwarded_count = 0
         duplicate_count = 0
+        processed_stage1 = 0
+        processed_stage2 = 0
         
         status = await message.reply("⏳ Starting movie forwarding...\n\n(Stage 1: Fetching Videos)", reply_markup=STOP_BUTTON)
 
         try:
             # --- STAGE 1: Sirf Video Messages ko search karega ---
             async for m in app.search_messages(src, filter=enums.MessagesFilter.VIDEO, limit=0):
-                if not is_forwarding: break
+                processed_stage1 += 1
                 
-                # --- FIX: Check karega ki m.video aur m.video.file_unique_id maujood hai ---
-                if not m.video or not m.video.file_unique_id:
-                    continue # Corrupted/Deleted/Service message ko skip karo
-                
-                unique_id = m.video.file_unique_id
-                if unique_id in forwarded_unique_ids:
-                    duplicate_count += 1
-                    continue
-
+                # --- FIX: Har message ko alag se try karo ---
                 try:
+                    if not is_forwarding: break
+                    
+                    if not m.video or not m.video.file_unique_id:
+                        continue 
+                    
+                    unique_id = m.video.file_unique_id
+                    if unique_id in forwarded_unique_ids:
+                        duplicate_count += 1
+                        continue
+
                     if mode_copy: await app.copy_message(tgt, src, m.id)
                     else: await app.forward_messages(tgt, src, m.id)
                     save_forwarded_id(unique_id)
                     forwarded_count += 1
+                    
                 except FloodWait as e:
                     await status.edit_text(f"⏳ FloodWait: sleeping {e.value}s…", reply_markup=STOP_BUTTON)
-                    time.sleep(e.value)
-                except RPCError:
-                    continue # Skip this message
+                    await asyncio.sleep(e.value) # <-- FIX: asyncio.sleep
+                except RPCError as e:
+                    print(f"[STAGE 1 RPCError] Skipping msg {m.id}: {e}")
+                    continue
+                except Exception as e:
+                    # --- FIX: Sabhi errors ko catch karo, log karo, aur continue karo ---
+                    print(f"[STAGE 1 ERROR] Skipping msg {m.id}: {e}")
+                    continue
                 
-                if forwarded_count % 50 == 0:
+                if (forwarded_count % 50 == 0) or (processed_stage1 % 200 == 0):
                      await status.edit_text(
-                        f"✅ Movies Forwarded: `{forwarded_count}` / {(limit_messages or '∞')}\n"
-                        f"🔍 Duplicates Skipped: `{duplicate_count}`\n"
-                        f"⏳ (Stage 1: Processing Videos...)",
+                        f"✅ Fwd: `{forwarded_count}` / {(limit_messages or '∞')}, 🔍 Dup: `{duplicate_count}`\n"
+                        f"⏳ (Stage 1: Processed {processed_stage1} videos...)",
                         reply_markup=STOP_BUTTON
                     )
 
@@ -252,44 +262,49 @@ def start_forward(_, message):
                 return
 
             await status.edit_text(
-                f"✅ Movies Forwarded: `{forwarded_count}`\n"
-                f"🔍 Duplicates Skipped: `{duplicate_count}`\n"
+                f"✅ Fwd: `{forwarded_count}`, 🔍 Dup: `{duplicate_count}`\n"
                 f"⏳ (Stage 2: Fetching Documents/Files...)",
                 reply_markup=STOP_BUTTON
             )
 
             # --- STAGE 2: Sirf Document (File) Messages ko search karega ---
             async for m in app.search_messages(src, filter=enums.MessagesFilter.DOCUMENT, limit=0):
-                if not is_forwarding: break
-                
-                if not (m.document and m.document.mime_type and m.document.mime_type.startswith("video/")):
-                    continue
-                
-                # --- FIX: Yahan bhi check karega ki file_unique_id maujood hai ---
-                if not m.document.file_unique_id:
-                    continue # Corrupted/Deleted message ko skip karo
-                
-                unique_id = m.document.file_unique_id
-                if unique_id in forwarded_unique_ids:
-                    duplicate_count += 1
-                    continue
+                processed_stage2 += 1
                 
                 try:
+                    if not is_forwarding: break
+                    
+                    if not (m.document and m.document.mime_type and m.document.mime_type.startswith("video/")):
+                        continue
+                    
+                    if not m.document.file_unique_id:
+                        continue
+                    
+                    unique_id = m.document.file_unique_id
+                    if unique_id in forwarded_unique_ids:
+                        duplicate_count += 1
+                        continue
+                    
                     if mode_copy: await app.copy_message(tgt, src, m.id)
                     else: await app.forward_messages(tgt, src, m.id)
                     save_forwarded_id(unique_id)
                     forwarded_count += 1
+
                 except FloodWait as e:
                     await status.edit_text(f"⏳ FloodWait: sleeping {e.value}s…", reply_markup=STOP_BUTTON)
-                    time.sleep(e.value)
-                except RPCError:
+                    await asyncio.sleep(e.value) # <-- FIX: asyncio.sleep
+                except RPCError as e:
+                    print(f"[STAGE 2 RPCError] Skipping msg {m.id}: {e}")
+                    continue
+                except Exception as e:
+                    # --- FIX: Sabhi errors ko catch karo, log karo, aur continue karo ---
+                    print(f"[STAGE 2 ERROR] Skipping msg {m.id}: {e}")
                     continue
                 
-                if forwarded_count % 50 == 0:
+                if (forwarded_count % 50 == 0) or (processed_stage2 % 200 == 0):
                     await status.edit_text(
-                        f"✅ Movies Forwarded: `{forwarded_count}`\n"
-                        f"🔍 Duplicates Skipped: `{duplicate_count}`\n"
-                        f"⏳ (Stage 2: Processing Files...)",
+                        f"✅ Fwd: `{forwarded_count}` / {(limit_messages or '∞')}, 🔍 Dup: `{duplicate_count}`\n"
+                        f"⏳ (Stage 2: Processed {processed_stage2} files...)",
                         reply_markup=STOP_BUTTON
                     )
 
@@ -305,7 +320,8 @@ def start_forward(_, message):
         await status.edit_text(
             f"🎉 Completed\n"
             f"✅ Total Movies Forwarded: `{forwarded_count}`\n"
-            f"🔍 Duplicates Skipped: `{duplicate_count}`",
+            f"🔍 Duplicates Skipped: `{duplicate_count}`\n"
+            f"(Processed {processed_stage1} videos & {processed_stage2} files)",
             reply_markup=None
         )
 
