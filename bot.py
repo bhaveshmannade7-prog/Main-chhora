@@ -29,7 +29,6 @@ def only_admin(_, __, m):
     return m.from_user and m.from_user.id == ADMIN_ID
 
 def _is_invite_link(s: str) -> bool:
-    # FIX: Added the closing parenthesis ')' at the end of the regex pattern
     return bool(re.search(r"(t\.me\/\+|joinchat\/|\?startinvite=|\?invite=)", s))
 
 async def resolve_chat_id(client: Client, ref: str | int):
@@ -64,7 +63,7 @@ async def resolve_chat_id(client: Client, ref: str | int):
         chat = await client.get_chat(ref)
         return chat.id
     except PeerIdInvalid:
-        raise RuntimeError("❌ Peer not known. Make sure this account joined that chat.")
+        raise RuntimeError("❌ Peer not known. Make sure this account joined that chat. **Run /sync first!**")
     except RPCError as e:
         raise RuntimeError(f"❌ Resolve failed: {e}")
 
@@ -123,7 +122,7 @@ def meet_cmd(_, message):
             tgt_id = await resolve_chat_id(app, target_channel)
             await message.reply(f"🤝 Met peers:\nSource: `{src_id}`\nTarget: `{tgt_id}`\nNow run `/start_forward`.")
         except Exception as e:
-            await message.reply(str(e))
+            await message.reply(f"{str(e)}\n\n**Tip:** Agar 'Peer not known' error aata hai, toh pehle `/sync` command chalao.")
     app.loop.create_task(runner())
 
 @app.on_message(filters.command("start_forward") & filters.create(only_admin))
@@ -199,7 +198,7 @@ def start_forward(_, message):
                 await status.edit(f"⏳ FloodWait: sleeping {e.value}s…")
                 time.sleep(e.value)
             except PeerIdInvalid:
-                await status.edit("❌ Peer invalid again. Run `/meet` first & ensure this account joined both chats.")
+                await status.edit("❌ Peer invalid again. Run `/sync` first, then `/meet`, and ensure this account joined both chats.")
                 return
             except Exception as e:
                 await status.edit(f"❌ Error: `{e}`")
@@ -225,6 +224,25 @@ def status_cmd(_, message):
         f"Forwarded: `{forwarded_count}`\n"
         f"Limit: `{limit_messages}`"
     )
+
+@app.on_message(filters.command("sync") & filters.create(only_admin))
+def sync_chats(_, message):
+    """
+    Force-updates the local session cache by fetching all dialogs.
+    Fixes "Peer not known" errors.
+    """
+    async def runner():
+        status = await message.reply("⏳ Syncing chats... (This may take a moment)")
+        count = 0
+        try:
+            # Iterating through dialogs forces Pyrogram to cache all chats
+            async for _ in app.get_dialogs():
+                count += 1
+            await status.edit(f"✅ Cache synced! Found {count} chats.")
+        except Exception as e:
+            await status.edit(f"❌ Sync failed: {e}")
+    app.loop.create_task(runner())
+
 
 @app.on_message(filters.command("ping") & filters.create(only_admin))
 def ping(_, message):
