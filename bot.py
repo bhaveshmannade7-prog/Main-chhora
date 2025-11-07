@@ -21,7 +21,7 @@ limit_messages = None
 forwarded_count = 0     # Is session me kitne forward hue
 is_forwarding = False
 mode_copy = True
-BATCH_SIZE = 100        # Ek baar me 100 message fetch karega
+BATCH_SIZE = 300        # <-- FIX: 100 se 300 kar diya (Optimization)
 # PER_MSG_DELAY hata diya gaya hai speed optimization ke liye.
 # Bot ab FloodWait par hi sleep karega.
 
@@ -272,8 +272,8 @@ def start_forward(_, message):
 
                 offset_id = batch[0].id
                 
-                # Status update har 50 movie par (kyunki ab yeh tezz hoga)
-                if forwarded_count % 50 == 0 and forwarded_count > 0:
+                # Status update har 100 movie par (kyunki ab batch 300 ka hai)
+                if forwarded_count % 100 == 0 and forwarded_count > 0:
                     await status.edit_text(
                         f"✅ Movies Forwarded: `{forwarded_count}` / {(limit_messages or '∞')}\n"
                         f"🔍 Duplicates Skipped: `{duplicate_count}`\n"
@@ -294,6 +294,7 @@ def start_forward(_, message):
                 is_forwarding = False
                 return
             except Exception as e:
+                # Agar 20s wala error aaye, toh woh bhi yahan dikhega
                 await status.edit_text(f"❌ Error: `{e}`", reply_markup=None)
                 is_forwarding = False
                 return
