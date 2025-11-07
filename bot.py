@@ -3,30 +3,17 @@ keep_alive()
 
 import os, time, re, json
 import asyncio
-from pyrogram import Client, filters, enums, idle
+from pyrogram import Client, filters, enums
 from pyrogram.errors import FloodWait, ChatAdminRequired, InviteHashExpired, InviteHashInvalid, PeerIdInvalid, UserAlreadyParticipant, MessageIdInvalid, MessageAuthorRequired, RPCError
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH") # <-- Yahaan galti thi, ab fix ho gayi hai
+API_HASH = os.getenv("API_HASH")
 SESSION_STRING = os.getenv("SESSION_STRING")
-BOT_TOKEN = os.getenv("BOT_TOKEN") # <-- NAYA
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
-# 1. Bot Client (Jo commands lega aur forward karega)
-app_bot = Client(
-    "bot",
-    api_id=API_ID, api_hash=API_HASH,
-    bot_token=BOT_TOKEN
-)
-
-# 2. User Client (Jo scan/index karega)
-app_user = Client(
-    "user",
-    api_id=API_ID, api_hash=API_HASH,
-    session_string=SESSION_STRING
-)
-
+# Session via string (Pyrogram v2)
+app = Client("user", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
 
 # --- Runtime state ---
 target_channel = None
@@ -34,7 +21,8 @@ limit_messages = None
 forwarded_count = 0
 is_forwarding = False
 mode_copy = True
-# PER_MSG_DELAY hata diya gaya hai
+# Har movie ke baad 0.5 sec ka pause stability ke liye
+PER_MSG_DELAY = 0.5 
 
 # --- Database Files ---
 DUPLICATE_DB_FILE = "forwarded_unique_ids.txt"
@@ -65,11 +53,13 @@ def load_forwarded_ids():
         except Exception as e:
             print(f"[DB ERR] loading duplicate DB: {e}")
             
+    # Target index se bhi IDs load karo
     if os.path.exists(TARGET_INDEX_DB_FILE):
         try:
             with open(TARGET_INDEX_DB_FILE, "r") as f:
                 target_ids = json.load(f)
                 forwarded_unique_ids.update(target_ids)
+            print(f"Loaded {len(target_ids)} IDs from target index.")
         except Exception as e:
             print(f"[DB ERR] loading target index DB: {e}")
 
@@ -103,15 +93,13 @@ def save_index_db():
 
 
 def only_admin(_, __, m):
-    # Ab message bot ko aa raha hai
+    # Ab message User account ko aa raha hai
     return m.from_user and m.from_user.id == ADMIN_ID
 
 def _is_invite_link(s: str) -> bool:
     return bool(re.search(r"(t\.me\/\+|joinchat\/|\?startinvite=|\?invite=)", s))
 
-# --- Resolve Chat ID (Ab User client ka istemaal karega) ---
 async def resolve_chat_id(client: Client, ref: str | int):
-    # client parameter ab app_user ya app_bot ho sakta hai
     if isinstance(ref, int) or (isinstance(ref, str) and ref.lstrip("-").isdigit()):
         try:
             chat = await client.get_chat(int(ref))
@@ -120,8 +108,7 @@ async def resolve_chat_id(client: Client, ref: str | int):
             pass
     if isinstance(ref, str) and _is_invite_link(ref):
         try:
-            # Join hamesha User account se karna hai
-            chat = await app_user.join_chat(ref)
+            chat = await client.join_chat(ref)
             return chat
         except UserAlreadyParticipant:
             chat = await client.get_chat(ref)
@@ -140,16 +127,14 @@ async def resolve_chat_id(client: Client, ref: str | int):
 
 # --- /start command (Updated) ---
 START_MESSAGE = """
-**🚀 Welcome, Admin! (Hybrid Bot V3)**
+**🚀 Welcome, Admin! (Stable Indexer Bot)**
 
-Yeh bot ab **User Account** (scan ke liye) aur **Bot Token** (forward ke liye) dono ka istemaal karta hai.
-
-**ZAROORI:**
-1.  Aapka **Bot** (`@bot_username`) **Target Channel** mein Admin hona chahiye.
-2.  Aapka **User Account** (session string) **Source/Index Channels** mein member hona chahiye.
+Yeh bot ab do stages me kaam karta hai:
+1.  **Index**: Source/Target channels ko scan karke local JSON file banata hai.
+2.  **Forward**: Uss JSON file se movies ko target channel par bhejta hai.
 
 **Workflow:**
-1.  `/sync` - (Important) User account ka cache sync karein.
+1.  `/sync` - (Important) Pehli baar zaroor chalayein.
 2.  `/index_target <target_chat_id>` - Target ko scan karo (sirf 1 baar).
 3.  `/index <source_channel_id>` - Source ko scan karo.
 4.  `/set_target <target_channel_id>` - Target ko set karo.
@@ -157,7 +142,7 @@ Yeh bot ab **User Account** (scan ke liye) aur **Bot Token** (forward ke liye) d
 
 **Available Commands:**
 * `/index <chat_id>` - Source channel ko scan karke `movie_database.json` banata hai.
-* `/index_target <chat_id>` - Target channel ko scan karke `target_index.json` banata hai.
+* `/index_target <chat_id>` - Target channel ko scan karke `target_index.json` banata hai (Duplicates ke liye).
 * `/clear_index` - Source index (`.json`) ko delete karta hai.
 * `/clear_target_index` - Target index (`.json`) ko delete karta hai.
 * `/set_target <chat_id>` - Target channel set karein.
@@ -165,18 +150,18 @@ Yeh bot ab **User Account** (scan ke liye) aur **Bot Token** (forward ke liye) d
 * `/set_limit <number>` - (Optional) Max kitni movies forward karni hain.
 * `/mode <copy/forward>` - `copy` (default) ya `forward`.
 * `/status` - Current settings aur databases ka status dikhata hai.
-* `/sync` - User account ke local cache ko sync karta hai.
+* `/sync` - Bot ke local cache ko Telegram ke saath sync karta hai.
 * `/ping` - Bot zinda hai ya nahi.
 * `/start` - Yeh help message dikhata hai.
 """
 
-@app_bot.on_message(filters.command("start") & filters.create(only_admin))
+@app.on_message(filters.command("start") & filters.create(only_admin))
 async def start_cmd(_, message):
     await message.reply(START_MESSAGE)
 # ---------------------------
 
 # --- /index (Source) ---
-@app_bot.on_message(filters.command("index") & filters.create(only_admin))
+@app.on_message(filters.command("index") & filters.create(only_admin))
 async def index_channel_cmd(_, message):
     global movie_index
     try:
@@ -188,8 +173,7 @@ async def index_channel_cmd(_, message):
     async def runner():
         global movie_index
         try:
-            # Resolve karne ke liye User Client ka istemaal
-            chat = await resolve_chat_id(app_user, source_ref)
+            chat = await resolve_chat_id(app, source_ref)
             src_id = chat.id
             src_name = chat.title or chat.username
         except Exception as e:
@@ -207,8 +191,8 @@ async def index_channel_cmd(_, message):
         found_count = 0
         
         try:
-            # Stage 1: Videos (User Client se scan)
-            async for m in app_user.search_messages(src_id, filter=enums.MessagesFilter.VIDEO, limit=0):
+            # Stage 1: Videos
+            async for m in app.search_messages(src_id, filter=enums.MessagesFilter.VIDEO, limit=0):
                 processed_stage1 += 1
                 try:
                     if not m.video or not m.video.file_unique_id: continue
@@ -224,8 +208,8 @@ async def index_channel_cmd(_, message):
 
             await status.edit(f"⏳ Indexing Source... (Stage 2: Files)\nProcessed: {processed_stage1} videos\nFound: {found_count} unique")
 
-            # Stage 2: Documents (Files) (User Client se scan)
-            async for m in app_user.search_messages(src_id, filter=enums.MessagesFilter.DOCUMENT, limit=0):
+            # Stage 2: Documents (Files)
+            async for m in app.search_messages(src_id, filter=enums.MessagesFilter.DOCUMENT, limit=0):
                 processed_stage2 += 1
                 try:
                     if not (m.document and m.document.mime_type and m.document.mime_type.startswith("video/")): continue
@@ -247,11 +231,11 @@ async def index_channel_cmd(_, message):
             await status.edit(f"❌ Source Indexing Error: `{e}`")
 
     # Bot ke loop me task run karo
-    app_bot.loop.create_task(runner())
+    app.loop.create_task(runner())
 # ---------------------------------
 
 # --- /index_target ---
-@app_bot.on_message(filters.command("index_target") & filters.create(only_admin))
+@app.on_message(filters.command("index_target") & filters.create(only_admin))
 async def index_target_cmd(_, message):
     try:
         target_ref = message.text.split(" ", 1)[1].strip()
@@ -261,9 +245,7 @@ async def index_target_cmd(_, message):
 
     async def runner():
         try:
-            # Target ko Bot ya User, koi bhi resolve kar sakta hai
-            # User se karna better hai agar target private hai
-            chat = await resolve_chat_id(app_user, target_ref)
+            chat = await resolve_chat_id(app, target_ref)
             tgt_id = chat.id
             tgt_name = chat.title or chat.username
         except Exception as e:
@@ -278,8 +260,8 @@ async def index_target_cmd(_, message):
         found_count = 0
         
         try:
-            # Stage 1: Videos (User Client se scan)
-            async for m in app_user.search_messages(tgt_id, filter=enums.MessagesFilter.VIDEO, limit=0):
+            # Stage 1: Videos
+            async for m in app.search_messages(tgt_id, filter=enums.MessagesFilter.VIDEO, limit=0):
                 processed_stage1 += 1
                 try:
                     if not m.video or not m.video.file_unique_id: continue
@@ -295,8 +277,8 @@ async def index_target_cmd(_, message):
 
             await status.edit(f"⏳ Indexing Target... (Stage 2: Files)\nProcessed: {processed_stage1} videos\nFound: {found_count} unique")
 
-            # Stage 2: Documents (Files) (User Client se scan)
-            async for m in app_user.search_messages(tgt_id, filter=enums.MessagesFilter.DOCUMENT, limit=0):
+            # Stage 2: Documents (Files)
+            async for m in app.search_messages(tgt_id, filter=enums.MessagesFilter.DOCUMENT, limit=0):
                 processed_stage2 += 1
                 try:
                     if not (m.document and m.document.mime_type and m.document.mime_type.startswith("video/")): continue
@@ -314,6 +296,7 @@ async def index_target_cmd(_, message):
             with open(TARGET_INDEX_DB_FILE, "w") as f:
                 json.dump(list(target_movie_ids), f)
             
+            # DBs ko reload karo
             load_forwarded_ids()
             
             await status.edit(f"🎉 Target Indexing Complete!\nChannel: `{tgt_name}`\nFound: **{found_count}** existing movies.\n\nDuplicate list (`{TARGET_INDEX_DB_FILE}`) update ho gayi hai.")
@@ -321,11 +304,11 @@ async def index_target_cmd(_, message):
         except Exception as e:
             await status.edit(f"❌ Target Indexing Error: `{e}`")
 
-    app_bot.loop.create_task(runner())
+    app.loop.create_task(runner())
 # ------------------------------------
 
 # --- Clear Commands ---
-@app_bot.on_message(filters.command("clear_index") & filters.create(only_admin))
+@app.on_message(filters.command("clear_index") & filters.create(only_admin))
 async def clear_index_cmd(_, message):
     global movie_index
     try:
@@ -338,12 +321,12 @@ async def clear_index_cmd(_, message):
     except Exception as e:
         await message.reply(f"❌ Source index delete nahi kar paaya: {e}")
 
-@app_bot.on_message(filters.command("clear_target_index") & filters.create(only_admin))
+@app.on_message(filters.command("clear_target_index") & filters.create(only_admin))
 async def clear_target_index_cmd(_, message):
     try:
         if os.path.exists(TARGET_INDEX_DB_FILE):
             os.remove(TARGET_INDEX_DB_FILE)
-            load_forwarded_ids()
+            load_forwarded_ids() # Reload karo
             await message.reply(f"✅ Target index (`{TARGET_INDEX_DB_FILE}`) delete kar diya hai. Duplicate set reload ho gaya.")
         else:
             await message.reply(f"ℹ️ Target index pehle se hi khaali hai.")
@@ -351,7 +334,7 @@ async def clear_target_index_cmd(_, message):
         await message.reply(f"❌ Target index delete nahi kar paaya: {e}")
 # ------------------------------------
 
-@app_bot.on_message(filters.command("set_target") & filters.create(only_admin))
+@app.on_message(filters.command("set_target") & filters.create(only_admin))
 async def set_target(_, message):
     global target_channel
     try:
@@ -360,7 +343,7 @@ async def set_target(_, message):
     except:
         await message.reply("❌ Usage:\n`/set_target -100123...` or `/set_target @channel`")
 
-@app_bot.on_message(filters.command("set_limit") & filters.create(only_admin))
+@app.on_message(filters.command("set_limit") & filters.create(only_admin))
 async def set_limit(_, message):
     global limit_messages
     try:
@@ -369,7 +352,7 @@ async def set_limit(_, message):
     except:
         await message.reply("❌ Usage: `/set_limit 20000`")
 
-@app_bot.on_message(filters.command("mode") & filters.create(only_admin))
+@app.on_message(filters.command("mode") & filters.create(only_admin))
 async def set_mode(_, message):
     global mode_copy
     try:
@@ -387,7 +370,7 @@ async def set_mode(_, message):
 
 # --- Stop Button ---
 STOP_BUTTON = InlineKeyboardMarkup([[InlineKeyboardButton("🛑 Stop Forwarding", callback_data="stop_fwd")]])
-@app_bot.on_callback_query(filters.regex("^stop_fwd$"))
+@app.on_callback_query(filters.regex("^stop_fwd$"))
 async def cb_stop_forward(client, query):
     if query.from_user.id != ADMIN_ID:
         await query.answer("❌ Not allowed!", show_alert=True)
@@ -400,7 +383,7 @@ async def cb_stop_forward(client, query):
     except: pass
 # -------------------
 
-@app_bot.on_message(filters.command("start_forward") & filters.create(only_admin))
+@app.on_message(filters.command("start_forward") & filters.create(only_admin))
 async def start_forward(_, message):
     global forwarded_count, is_forwarding
 
@@ -416,8 +399,8 @@ async def start_forward(_, message):
             return
 
         try:
-            # Target ko Bot Client se resolve karo
-            tgt_chat = await resolve_chat_id(app_bot, target_channel)
+            # Target ko resolve karo
+            tgt_chat = await resolve_chat_id(app, target_channel)
             tgt = tgt_chat.id
             src = movie_index["source_channel_id"]
             src_name = movie_index["source_channel_name"]
@@ -454,20 +437,18 @@ async def start_forward(_, message):
                         duplicate_count += 1
                         continue
                     
-                    # --- FORWARDING AB BOT CLIENT SE HOGA ---
                     if mode_copy:
-                        await app_bot.copy_message(tgt, src, message_id)
+                        await app.copy_message(tgt, src, message_id)
                     else:
-                        await app_bot.forward_messages(tgt, src, message_id)
-                    # ----------------------------------------
+                        await app.forward_messages(tgt, src, message_id)
                     
                     save_forwarded_id(unique_id) 
                     forwarded_count += 1
                     
-                    # PER_MSG_DELAY nahi hai, bot full speed se chalega
+                    # Stability ke liye pause
+                    await asyncio.sleep(PER_MSG_DELAY) 
                     
                 except FloodWait as e:
-                    # Bot client bhi floodwait le sakta hai, lekin bohot kam
                     await status.edit_text(f"⏳ FloodWait: sleeping {e.value}s…", reply_markup=STOP_BUTTON)
                     await asyncio.sleep(e.value)
                 except (MessageIdInvalid, MessageAuthorRequired):
@@ -475,11 +456,6 @@ async def start_forward(_, message):
                     continue
                 except RPCError as e:
                     print(f"[FORWARD RPCError] Skipping msg {message_id}: {e}")
-                    # Common error: Bot target me admin nahi hai
-                    if "CHAT_ADMIN_REQUIRED" in str(e):
-                         await status.edit_text(f"❌ Error: Bot ko Target Channel (`{target_channel}`) me Admin banayein.", reply_markup=None)
-                         is_forwarding = False
-                         break
                     continue
                 except Exception as e:
                     print(f"[FORWARD ERROR] Skipping msg {message_id}: {e}")
@@ -511,15 +487,15 @@ async def start_forward(_, message):
             reply_markup=None
         )
 
-    app_bot.loop.create_task(runner())
+    app.loop.create_task(runner())
 
-@app_bot.on_message(filters.command("stop_forward") & filters.create(only_admin))
+@app.on_message(filters.command("stop_forward") & filters.create(only_admin))
 async def stop_forward(_, message):
     global is_forwarding
     is_forwarding = False
     await message.reply("🛑 Stop requested.")
 
-@app_bot.on_message(filters.command("status") & filters.create(only_admin))
+@app.on_message(filters.command("status") & filters.create(only_admin))
 async def status_cmd(_, message):
     total_in_fwd_db = 0
     if os.path.exists(DUPLICATE_DB_FILE):
@@ -528,8 +504,10 @@ async def status_cmd(_, message):
             
     total_in_target_db = 0
     if os.path.exists(TARGET_INDEX_DB_FILE):
-        with open(TARGET_INDEX_DB_FILE, "r") as f:
-            total_in_target_db = len(json.load(f))
+        try:
+            with open(TARGET_INDEX_DB_FILE, "r") as f:
+                total_in_target_db = len(json.load(f))
+        except: pass # File khaali ho sakti hai
 
     total_in_index = len(movie_index.get('movies', {}))
     
@@ -548,47 +526,29 @@ async def status_cmd(_, message):
         f"Total Duplicates in Memory: `{len(forwarded_unique_ids)}`"
     )
 
-@app_bot.on_message(filters.command("sync") & filters.create(only_admin))
+@app.on_message(filters.command("sync") & filters.create(only_admin))
 async def sync_chats(_, message):
     async def runner():
         status = await message.reply("⏳ Syncing User Account chats...")
         count = 0
         try:
-            # User Client se sync karo
-            async for _ in app_user.get_dialogs():
+            async for _ in app.get_dialogs():
                 count += 1
             await status.edit(f"✅ User Account Cache synced! Found {count} chats.")
         except Exception as e:
             await status.edit(f"❌ Sync failed: {e}")
-    app_bot.loop.create_task(runner())
+    app.loop.create_task(runner())
 
 
-@app_bot.on_message(filters.command("ping") & filters.create(only_admin))
+@app.on_message(filters.command("ping") & filters.create(only_admin))
 async def ping(_, message):
     await message.reply("✅ Alive | Polling | Ready")
 
-
-async def main():
-    print("Loading databases...")
-    load_forwarded_ids()
-    load_index_db()
-    print(f"Loaded {len(forwarded_unique_ids)} total unique IDs (Bot Fwd + Target Index) into memory.")
-    print(f"Loaded {len(movie_index.get('movies', {}))} indexed movies from {INDEX_DB_FILE}")
-    
-    print("Starting User Client (for indexing)...")
-    await app_user.start()
-    print("User Client Started.")
-    
-    print("Starting Bot Client (main)...")
-    await app_bot.start()
-    print("Bot Client Started.")
-    
-    print("✅ Hybrid Bot ready — send commands to your Bot.")
-    await idle()
-    
-    print("Stopping clients...")
-    await app_user.stop()
-    await app_bot.stop()
-
-if __name__ == "__main__":
-    app_bot.loop.run_until_complete(main())
+# Start loop
+print("Loading databases...")
+load_forwarded_ids()
+load_index_db()
+print(f"Loaded {len(forwarded_unique_ids)} total unique IDs (Bot Fwd + Target Index) into memory.")
+print(f"Loaded {len(movie_index.get('movies', {}))} indexed movies from {INDEX_DB_FILE}")
+print("✅ UserBot ready — send commands.")
+app.run()
