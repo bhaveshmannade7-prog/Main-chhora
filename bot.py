@@ -7,8 +7,8 @@ from pyrogram.errors import FloodWait, ChatAdminRequired, InviteHashExpired, Inv
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH"))
-SESSION_STRING = os.getenv("SESSION_STRING"))
+API_HASH = os.getenv("API_HASH") # <-- FIX: Extra ')' hata diya
+SESSION_STRING = os.getenv("SESSION_STRING") # <-- FIX: Extra ')' hata diya
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
 # Session via string (Pyrogram v2)
