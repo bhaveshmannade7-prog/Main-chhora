@@ -9,7 +9,7 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
-SESSION_STRING = os.getenv("SESSION_STRING")
+SESSION_STRING = os.getenv("SESSION_STRING"))
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
 # Session via string (Pyrogram v2)
@@ -23,6 +23,9 @@ is_forwarding = False
 mode_copy = True
 # Har movie ke baad 0.5 sec ka pause stability ke liye
 PER_MSG_DELAY = 0.5 
+# Har 250 movies (50 * 5 batch) ke baad 10 sec ka break
+BATCH_SIZE_FOR_BREAK = 250
+BREAK_DURATION_SEC = 10
 
 # --- Database Files ---
 DUPLICATE_DB_FILE = "forwarded_unique_ids.txt"
@@ -53,7 +56,6 @@ def load_forwarded_ids():
         except Exception as e:
             print(f"[DB ERR] loading duplicate DB: {e}")
             
-    # Target index se bhi IDs load karo
     if os.path.exists(TARGET_INDEX_DB_FILE):
         try:
             with open(TARGET_INDEX_DB_FILE, "r") as f:
@@ -93,7 +95,6 @@ def save_index_db():
 
 
 def only_admin(_, __, m):
-    # Ab message User account ko aa raha hai
     return m.from_user and m.from_user.id == ADMIN_ID
 
 def _is_invite_link(s: str) -> bool:
@@ -127,11 +128,13 @@ async def resolve_chat_id(client: Client, ref: str | int):
 
 # --- /start command (Updated) ---
 START_MESSAGE = """
-**🚀 Welcome, Admin! (Stable Indexer Bot)**
+**🚀 Welcome, Admin! (Stable Indexer Bot V2)**
 
 Yeh bot ab do stages me kaam karta hai:
 1.  **Index**: Source/Target channels ko scan karke local JSON file banata hai.
 2.  **Forward**: Uss JSON file se movies ko target channel par bhejta hai.
+
+**Naya Feature:** Bot ab har 250 movies (5 batch) ke baad 10 second ka break lega.
 
 **Workflow:**
 1.  `/sync` - (Important) Pehli baar zaroor chalayein.
@@ -230,7 +233,6 @@ async def index_channel_cmd(_, message):
         except Exception as e:
             await status.edit(f"❌ Source Indexing Error: `{e}`")
 
-    # Bot ke loop me task run karo
     app.loop.create_task(runner())
 # ---------------------------------
 
@@ -296,7 +298,6 @@ async def index_target_cmd(_, message):
             with open(TARGET_INDEX_DB_FILE, "w") as f:
                 json.dump(list(target_movie_ids), f)
             
-            # DBs ko reload karo
             load_forwarded_ids()
             
             await status.edit(f"🎉 Target Indexing Complete!\nChannel: `{tgt_name}`\nFound: **{found_count}** existing movies.\n\nDuplicate list (`{TARGET_INDEX_DB_FILE}`) update ho gayi hai.")
@@ -326,7 +327,7 @@ async def clear_target_index_cmd(_, message):
     try:
         if os.path.exists(TARGET_INDEX_DB_FILE):
             os.remove(TARGET_INDEX_DB_FILE)
-            load_forwarded_ids() # Reload karo
+            load_forwarded_ids() 
             await message.reply(f"✅ Target index (`{TARGET_INDEX_DB_FILE}`) delete kar diya hai. Duplicate set reload ho gaya.")
         else:
             await message.reply(f"ℹ️ Target index pehle se hi khaali hai.")
@@ -399,7 +400,6 @@ async def start_forward(_, message):
             return
 
         try:
-            # Target ko resolve karo
             tgt_chat = await resolve_chat_id(app, target_channel)
             tgt = tgt_chat.id
             src = movie_index["source_channel_id"]
@@ -445,7 +445,6 @@ async def start_forward(_, message):
                     save_forwarded_id(unique_id) 
                     forwarded_count += 1
                     
-                    # Stability ke liye pause
                     await asyncio.sleep(PER_MSG_DELAY) 
                     
                 except FloodWait as e:
@@ -461,7 +460,7 @@ async def start_forward(_, message):
                     print(f"[FORWARD ERROR] Skipping msg {message_id}: {e}")
                     continue
                 
-                # Status update har 50 movies (ya 500 processed) par
+                # Status update har 50 movies (1 batch)
                 if (forwarded_count % 50 == 0) or (processed_count % 500 == 0):
                     try:
                         await status.edit_text(
@@ -470,6 +469,20 @@ async def start_forward(_, message):
                             reply_markup=STOP_BUTTON
                         )
                     except FloodWait: pass 
+
+                # --- YEH NAYA CODE HAI ---
+                # Har 5 batch (5 * 50 = 250 movies) ke baad 10 sec ka break
+                if forwarded_count > 0 and forwarded_count % BATCH_SIZE_FOR_BREAK == 0 and is_forwarding:
+                    try:
+                        await status.edit_text(
+                            f"✅ Fwd: `{forwarded_count}`. 5 batch complete.\n"
+                            f"☕ {BREAK_DURATION_SEC} second ka break le raha hoon...",
+                            reply_markup=STOP_BUTTON
+                        )
+                    except FloodWait: pass
+                    
+                    await asyncio.sleep(BREAK_DURATION_SEC) # 10 second ka break
+                # --- NAYA CODE KHATAM ---
 
                 if limit_messages and forwarded_count >= limit_messages:
                     is_forwarding = False
@@ -507,7 +520,7 @@ async def status_cmd(_, message):
         try:
             with open(TARGET_INDEX_DB_FILE, "r") as f:
                 total_in_target_db = len(json.load(f))
-        except: pass # File khaali ho sakti hai
+        except: pass 
 
     total_in_index = len(movie_index.get('movies', {}))
     
