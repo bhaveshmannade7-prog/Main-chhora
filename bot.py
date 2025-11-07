@@ -5,13 +5,14 @@ import os
 import time
 from pyrogram import Client, filters
 from pyrogram.errors import FloodWait
+from pyrogram.session import StringSession
 
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 SESSION_STRING = os.getenv("SESSION_STRING")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
-app = Client(SESSION_STRING, api_id=API_ID, api_hash=API_HASH)
+app = Client(StringSession(SESSION_STRING), api_id=API_ID, api_hash=API_HASH)
 
 source_channel = None
 target_channel = None
@@ -31,7 +32,7 @@ def set_source(_, message):
         source_channel = message.text.split(" ")[1]
         message.reply(f"✅ Source Set: `{source_channel}`")
     except:
-        message.reply("❌ Usage:\n`/set_source -100xxxxxxxxxx`")
+        message.reply("❌ Usage: /set_source -100xxxx")
 
 
 @app.on_message(filters.command("set_target") & filters.create(only_admin))
@@ -41,7 +42,7 @@ def set_target(_, message):
         target_channel = message.text.split(" ")[1]
         message.reply(f"✅ Target Set: `{target_channel}`")
     except:
-        message.reply("❌ Usage:\n`/set_target -100xxxxxxxxxx`")
+        message.reply("❌ Usage: /set_target -100xxxx")
 
 
 @app.on_message(filters.command("set_limit") & filters.create(only_admin))
@@ -49,9 +50,9 @@ def set_limit(_, message):
     global limit_messages
     try:
         limit_messages = int(message.text.split(" ")[1])
-        message.reply(f"✅ Limit Set: `{limit_messages}`")
+        message.reply(f"✅ Forward Limit Set: {limit_messages}")
     except:
-        message.reply("❌ Usage:\n`/set_limit 15000`")
+        message.reply("❌ Usage: /set_limit 20000")
 
 
 @app.on_message(filters.command("start_forward") & filters.create(only_admin))
@@ -59,56 +60,47 @@ def start_forward(_, message):
     global forwarded_count, is_forwarding
 
     if not source_channel or not target_channel:
-        return message.reply("⚠ Pehle `/set_source` aur `/set_target` set karo")
+        return message.reply("⚠ Pehle /set_source aur /set_target set karo")
 
     is_forwarding = True
     forwarded_count = 0
-    status = message.reply("⏳ Starting Forward...")
+    status = message.reply("⏳ Forwarding Starting...")
 
     for msg in app.get_chat_history(source_channel, limit=limit_messages):
         if not is_forwarding:
-            return status.edit(f"🛑 Stopped\n✅ Forwarded: `{forwarded_count}`")
+            return status.edit(f"🛑 Stopped\n✅ Forwarded: {forwarded_count}")
 
         try:
-            app.copy_message(
-                chat_id=target_channel,
-                from_chat_id=source_channel,
-                message_id=msg.id
-            )
+            app.copy_message(target_channel, source_channel, msg.id)
             forwarded_count += 1
 
             if forwarded_count % 100 == 0:
-                status.edit(f"✅ Forwarded `{forwarded_count}`...\n⏳ Working...")
+                status.edit(f"✅ Forwarded: {forwarded_count} messages...\n⏳ Working...")
                 time.sleep(2)
 
         except FloodWait as e:
             status.edit(f"⏳ FloodWait: Sleeping {e.value}s")
             time.sleep(e.value)
 
-    status.edit(f"🎉 Completed!\n✅ Total Forwarded: `{forwarded_count}`")
+    status.edit(f"🎉 Completed\n✅ Total Forwarded: {forwarded_count}")
 
 
 @app.on_message(filters.command("stop_forward") & filters.create(only_admin))
 def stop_forward(_, message):
     global is_forwarding
     is_forwarding = False
-    message.reply("🛑 Stop Request Sent.")
+    message.reply("🛑 Stop request registered.")
 
 
 @app.on_message(filters.command("status") & filters.create(only_admin))
 def status(_, message):
-    message.reply(
-        f"📊 Status:\n"
-        f"Source: `{source_channel}`\n"
-        f"Target: `{target_channel}`\n"
-        f"Forwarded: `{forwarded_count}`"
-    )
+    message.reply(f"📊 Status:\nSource: {source_channel}\nTarget: {target_channel}\nForwarded: {forwarded_count}")
 
 
 @app.on_message(filters.command("ping") & filters.create(only_admin))
 def ping(_, message):
-    message.reply("✅ Alive | Polling Mode OK")
+    message.reply("✅ Bot Alive | Polling OK | Session Loaded")
 
 
-print("✅ UserBot Started | Control from Your Group")
+print("✅ UserBot Running — Control from your private group")
 app.run()
