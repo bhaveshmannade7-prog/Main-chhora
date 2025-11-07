@@ -4,26 +4,51 @@ keep_alive()
 import os, time, re
 from pyrogram import Client, filters
 from pyrogram.errors import FloodWait, ChatAdminRequired, InviteHashExpired, InviteHashInvalid, PeerIdInvalid, UserAlreadyParticipant, MessageIdInvalid, MessageAuthorRequired, RPCError
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
-SESSION_STRING = os.getenv("SESSION_STRING")
+API_HASH = os.getenv("API_HASH"))
+SESSION_STRING = os.getenv("SESSION_STRING"))
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
 # Session via string (Pyrogram v2)
 app = Client("user", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
 
-# Runtime state
-source_channel = None   # can be -100id / @username / invite link
+# --- Runtime state ---
+source_channel = None
 target_channel = None
-limit_messages = None   # int
-forwarded_count = 0
+limit_messages = None
+forwarded_count = 0     # Is session me kitne forward hue
 is_forwarding = False
-mode_copy = True        # default: COPY (no "forwarded from")
-BATCH_SIZE = 100
-
-# Tiny delay to avoid hard flood (tune 0.15 ~ 0.3)
+mode_copy = True
+BATCH_SIZE = 100        # Ek baar me 100 message fetch karega
 PER_MSG_DELAY = 0.2
+
+# --- Duplicate Check ---
+DUPLICATE_DB_FILE = "forwarded_unique_ids.txt"
+forwarded_unique_ids = set()
+
+def load_forwarded_ids():
+    """Bot start hone par purane IDs ko load karta hai"""
+    global forwarded_unique_ids
+    if os.path.exists(DUPLICATE_DB_FILE):
+        try:
+            with open(DUPLICATE_DB_FILE, "r") as f:
+                for line in f:
+                    forwarded_unique_ids.add(line.strip())
+        except Exception as e:
+            print(f"Error loading duplicate DB: {e}")
+
+def save_forwarded_id(unique_id):
+    """Naye forward hue ID ko file me save karta hai"""
+    try:
+        forwarded_unique_ids.add(unique_id)
+        with open(DUPLICATE_DB_FILE, "a") as f:
+            f.write(f"{unique_id}\n")
+    except Exception as e:
+        print(f"Error saving duplicate ID: {e}")
+# -------------------------
+
 
 def only_admin(_, __, m):
     return m.from_user and m.from_user.id == ADMIN_ID
@@ -32,20 +57,14 @@ def _is_invite_link(s: str) -> bool:
     return bool(re.search(r"(t\.me\/\+|joinchat\/|\?startinvite=|\?invite=)", s))
 
 async def resolve_chat_id(client: Client, ref: str | int):
-    """
-    Accepts -100ID / @username / invite link.
-    Ensures peer is 'met' so get_chat_history works.
-    Returns numeric chat_id (e.g., -100xxxxxxxxx).
-    """
-    # Numeric id
+    """Chat ID ko resolve karta hai"""
     if isinstance(ref, int) or (isinstance(ref, str) and ref.lstrip("-").isdigit()):
         try:
             chat = await client.get_chat(int(ref))
             return chat.id
         except Exception:
-            pass  # fall through
+            pass
 
-    # Invite links → try join
     if isinstance(ref, str) and _is_invite_link(ref):
         try:
             chat = await client.join_chat(ref)
@@ -58,7 +77,6 @@ async def resolve_chat_id(client: Client, ref: str | int):
         except ChatAdminRequired as e:
             raise RuntimeError(f"❌ Need admin to use this invite: {e}")
 
-    # @username or public link
     try:
         chat = await client.get_chat(ref)
         return chat.id
@@ -112,7 +130,6 @@ def set_mode(_, message):
 
 @app.on_message(filters.command("meet") & filters.create(only_admin))
 def meet_cmd(_, message):
-    # Pre-resolve both peers; helpful for -100 ids and speed
     async def runner():
         if not source_channel or not target_channel:
             await message.reply("⚠ Pehle `/set_source` & `/set_target` set karo.")
@@ -124,6 +141,23 @@ def meet_cmd(_, message):
         except Exception as e:
             await message.reply(f"{str(e)}\n\n**Tip:** Agar 'Peer not known' error aata hai, toh pehle `/sync` command chalao.")
     app.loop.create_task(runner())
+
+
+# --- Naya Stop Button ---
+STOP_BUTTON = InlineKeyboardMarkup([[InlineKeyboardButton("🛑 Stop Forwarding", callback_data="stop_fwd")]])
+
+@app.on_callback_query(filters.regex("^stop_fwd$") & filters.create(only_admin))
+async def cb_stop_forward(_, query):
+    """Stop button ko handle karta hai"""
+    global is_forwarding
+    is_forwarding = False
+    await query.answer("🛑 Stop request received.", show_alert=False)
+    try:
+        await query.message.edit_text("🛑 Stop requested. Finishing current batch...", reply_markup=None)
+    except:
+        pass # Message nahi badla toh error aayega, ignore karo
+# -------------------------
+
 
 @app.on_message(filters.command("start_forward") & filters.create(only_admin))
 def start_forward(_, message):
@@ -144,67 +178,100 @@ def start_forward(_, message):
             return
 
         is_forwarding = True
-        forwarded_count = 0
-        status = await message.reply("⏳ Starting forwarding...")
+        forwarded_count = 0 # Session counter reset
+        skipped_count = 0
+        duplicate_count = 0
+        
+        status = await message.reply("⏳ Starting movie forwarding...", reply_markup=STOP_BUTTON)
 
-        # Pagination using offset_id
-        fetched = 0
         offset_id = 0
         while True:
             if not is_forwarding:
-                await status.edit(f"🛑 Stopped\n✅ Forwarded: `{forwarded_count}`")
+                await status.edit_text(f"🛑 Stopped\n✅ Movies Forwarded: `{forwarded_count}`\n🔍 Duplicates: `{duplicate_count}`", reply_markup=None)
                 return
 
             try:
-                # get_chat_history newest→oldest; use offset_id to paginate
                 batch = []
                 async for m in app.get_chat_history(src, offset_id=offset_id, limit=BATCH_SIZE):
                     batch.append(m)
                 if not batch:
-                    break
+                    break # History khatam
 
-                # Process oldest first within the batch to keep order
-                for m in reversed(batch):
+                for m in reversed(batch): # Order maintain karne ke liye
+                    if not is_forwarding:
+                        break # Batch ke beech me stop
+                    
+                    # --- Movie Filter aur Duplicate Check ---
+                    unique_id = None
+                    if m.video:
+                        unique_id = m.video.file_unique_id
+                    elif m.document and m.document.mime_type and m.document.mime_type.startswith("video/"):
+                        unique_id = m.document.file_unique_id
+                    
+                    if not unique_id:
+                        skipped_count += 1
+                        continue # Yeh movie nahi hai
+                    
+                    if unique_id in forwarded_unique_ids:
+                        duplicate_count += 1
+                        continue # Yeh duplicate hai
+                    # ----------------------------------------
+                    
                     try:
                         if mode_copy:
                             await app.copy_message(tgt, src, m.id)
                         else:
                             await app.forward_messages(tgt, src, m.id)
+                        
+                        save_forwarded_id(unique_id) # Success par save karo
                         forwarded_count += 1
                         time.sleep(PER_MSG_DELAY)
+                        
                     except FloodWait as e:
-                        await status.edit(f"⏳ FloodWait: sleeping {e.value}s…")
+                        await status.edit_text(f"⏳ FloodWait: sleeping {e.value}s…", reply_markup=STOP_BUTTON)
                         time.sleep(e.value)
                     except RPCError as e:
-                        # Content-protected / other errors
                         if "MESSAGE_COPY_FORBIDDEN" in str(e):
-                            await status.edit("❌ Source is **Content Protected**.\nUse `/mode forward` then `/start_forward`.")
+                            await status.edit_text("❌ Source is **Content Protected**.\nUse `/mode forward` then `/start_forward`.", reply_markup=None)
+                            is_forwarding = False
                             return
-                        # Skip individual bad message & continue
-                        continue
+                        continue # Individual message error, skip karo
 
-                # next page
-                offset_id = batch[0].id  # oldest id of this page
-                fetched += len(batch)
+                offset_id = batch[0].id
+                
+                # Status update har 20 movie par
+                if forwarded_count % 20 == 0 and forwarded_count > 0:
+                    await status.edit_text(
+                        f"✅ Movies Forwarded: `{forwarded_count}` / {(limit_messages or '∞')}\n"
+                        f"🔍 Duplicates Skipped: `{duplicate_count}`\n"
+                        f"🚫 Non-Movies Skipped: `{skipped_count}`\n"
+                        f"⏳ Working...",
+                        reply_markup=STOP_BUTTON
+                    )
 
-                if forwarded_count % 100 == 0:
-                    await status.edit(f"✅ Forwarded: `{forwarded_count}` / {(limit_messages or '∞')}\n⏳ Working…")
-
-                # Respect overall limit if set
                 if limit_messages and forwarded_count >= limit_messages:
+                    is_forwarding = False # Limit poora ho gaya
                     break
 
             except FloodWait as e:
-                await status.edit(f"⏳ FloodWait: sleeping {e.value}s…")
+                await status.edit_text(f"⏳ FloodWait: sleeping {e.value}s…", reply_markup=STOP_BUTTON)
                 time.sleep(e.value)
             except PeerIdInvalid:
-                await status.edit("❌ Peer invalid again. Run `/sync` first, then `/meet`, and ensure this account joined both chats.")
+                await status.edit_text("❌ Peer invalid. Run `/sync` first.", reply_markup=None)
+                is_forwarding = False
                 return
             except Exception as e:
-                await status.edit(f"❌ Error: `{e}`")
+                await status.edit_text(f"❌ Error: `{e}`", reply_markup=None)
+                is_forwarding = False
                 return
 
-        await status.edit(f"🎉 Completed\n✅ Total Forwarded: `{forwarded_count}`")
+        await status.edit_text(
+            f"🎉 Completed\n"
+            f"✅ Total Movies Forwarded: `{forwarded_count}`\n"
+            f"🔍 Duplicates Skipped: `{duplicate_count}`\n"
+            f"🚫 Non-Movies Skipped: `{skipped_count}`",
+            reply_markup=None
+        )
 
     app.loop.create_task(runner())
 
@@ -216,26 +283,25 @@ def stop_forward(_, message):
 
 @app.on_message(filters.command("status") & filters.create(only_admin))
 def status_cmd(_, message):
+    total_in_db = len(forwarded_unique_ids)
     message.reply(
         f"📊 Status\n"
         f"Source: `{source_channel}`\n"
         f"Target: `{target_channel}`\n"
         f"Mode: `{'COPY' if mode_copy else 'FORWARD'}`\n"
+        f"Limit: `{limit_messages}`\n"
+        f"--- Session ---\n"
         f"Forwarded: `{forwarded_count}`\n"
-        f"Limit: `{limit_messages}`"
+        f"--- Database ---\n"
+        f"Total Unique Movies in DB: `{total_in_db}`"
     )
 
 @app.on_message(filters.command("sync") & filters.create(only_admin))
 def sync_chats(_, message):
-    """
-    Force-updates the local session cache by fetching all dialogs.
-    Fixes "Peer not known" errors.
-    """
     async def runner():
-        status = await message.reply("⏳ Syncing chats... (This may take a moment)")
+        status = await message.reply("⏳ Syncing chats...")
         count = 0
         try:
-            # Iterating through dialogs forces Pyrogram to cache all chats
             async for _ in app.get_dialogs():
                 count += 1
             await status.edit(f"✅ Cache synced! Found {count} chats.")
@@ -247,6 +313,10 @@ def sync_chats(_, message):
 @app.on_message(filters.command("ping") & filters.create(only_admin))
 def ping(_, message):
     message.reply("✅ Alive | Polling | Ready")
+
+print("Loading duplicate database...")
+load_forwarded_ids()
+print(f"Loaded {len(forwarded_unique_ids)} unique file IDs from {DUPLICATE_DB_FILE}")
 
 print("✅ UserBot ready — send commands in your control group.")
 app.run()
