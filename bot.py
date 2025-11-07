@@ -29,7 +29,8 @@ def only_admin(_, __, m):
     return m.from_user and m.from_user.id == ADMIN_ID
 
 def _is_invite_link(s: str) -> bool:
-    return bool(re.search(r"(t\.me\/\+|joinchat\/|\?startinvite=|\?invite=", s))
+    # FIX: Added the closing parenthesis ')' at the end of the regex pattern
+    return bool(re.search(r"(t\.me\/\+|joinchat\/|\?startinvite=|\?invite=)", s))
 
 async def resolve_chat_id(client: Client, ref: str | int):
     """
