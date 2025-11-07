@@ -2,7 +2,7 @@ from keep_alive import keep_alive
 keep_alive()
 
 import os, time, re
-from pyrogram import Client, filters, enums  # <-- 'enums' ko add kiya hai
+from pyrogram import Client, filters, enums
 from pyrogram.errors import FloodWait, ChatAdminRequired, InviteHashExpired, InviteHashInvalid, PeerIdInvalid, UserAlreadyParticipant, MessageIdInvalid, MessageAuthorRequired, RPCError
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
@@ -21,7 +21,6 @@ limit_messages = None
 forwarded_count = 0
 is_forwarding = False
 mode_copy = True
-# BATCH_SIZE ki ab zaroorat nahi, kyunki hum search_messages use kar rahe hain
 
 # --- Duplicate Check ---
 DUPLICATE_DB_FILE = "forwarded_unique_ids.txt"
@@ -213,11 +212,13 @@ def start_forward(_, message):
 
         try:
             # --- STAGE 1: Sirf Video Messages ko search karega ---
-            # Yeh 21-sec wait trigger kar sakta hai, lekin sirf videos ke batch ke liye
             async for m in app.search_messages(src, filter=enums.MessagesFilter.VIDEO, limit=0):
                 if not is_forwarding: break
                 
-                # Yeh message video hai, skipped count ki zaroorat nahi
+                # --- FIX: Check karega ki m.video aur m.video.file_unique_id maujood hai ---
+                if not m.video or not m.video.file_unique_id:
+                    continue # Corrupted/Deleted/Service message ko skip karo
+                
                 unique_id = m.video.file_unique_id
                 if unique_id in forwarded_unique_ids:
                     duplicate_count += 1
@@ -234,7 +235,6 @@ def start_forward(_, message):
                 except RPCError:
                     continue # Skip this message
                 
-                # Status update
                 if forwarded_count % 50 == 0:
                      await status.edit_text(
                         f"✅ Movies Forwarded: `{forwarded_count}` / {(limit_messages or '∞')}\n"
@@ -244,7 +244,7 @@ def start_forward(_, message):
                     )
 
                 if limit_messages and forwarded_count >= limit_messages:
-                    is_forwarding = False # Limit poora ho gaya
+                    is_forwarding = False
                     break
             
             if not is_forwarding:
@@ -262,9 +262,12 @@ def start_forward(_, message):
             async for m in app.search_messages(src, filter=enums.MessagesFilter.DOCUMENT, limit=0):
                 if not is_forwarding: break
                 
-                # Check karega ki yeh document video hai ya nahi
                 if not (m.document and m.document.mime_type and m.document.mime_type.startswith("video/")):
-                    continue # Yeh .zip, .txt, etc. hai. Skip karo.
+                    continue
+                
+                # --- FIX: Yahan bhi check karega ki file_unique_id maujood hai ---
+                if not m.document.file_unique_id:
+                    continue # Corrupted/Deleted message ko skip karo
                 
                 unique_id = m.document.file_unique_id
                 if unique_id in forwarded_unique_ids:
@@ -299,7 +302,6 @@ def start_forward(_, message):
             is_forwarding = False
             return
 
-        # Sab kuch ho gaya
         await status.edit_text(
             f"🎉 Completed\n"
             f"✅ Total Movies Forwarded: `{forwarded_count}`\n"
