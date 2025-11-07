@@ -8,8 +8,8 @@ from pyrogram.errors import FloodWait, ChatAdminRequired, InviteHashExpired, Inv
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH"))
-SESSION_STRING = os.getenv("SESSION_STRING"))
+API_HASH = os.getenv("API_HASH") # <-- FIX: Extra ')' hata diya
+SESSION_STRING = os.getenv("SESSION_STRING") # <-- FIX: Extra ')' hata diya
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
 # Session via string (Pyrogram v2)
@@ -186,7 +186,10 @@ def index_channel_cmd(_, message):
                     continue
                 
                 if processed_stage1 % 500 == 0:
-                    await status.edit(f"⏳ Indexing... (Stage 1)\nProcessed: {processed_stage1} videos\nFound: {found_count} unique")
+                    try:
+                        await status.edit(f"⏳ Indexing... (Stage 1)\nProcessed: {processed_stage1} videos\nFound: {found_count} unique")
+                    except FloodWait:
+                        pass # Status update ko skip karo agar floodwait hai
 
             await status.edit(f"⏳ Indexing... (Stage 2: Files)\nProcessed: {processed_stage1} videos\nFound: {found_count} unique")
 
@@ -208,7 +211,10 @@ def index_channel_cmd(_, message):
                     continue
 
                 if processed_stage2 % 500 == 0:
-                    await status.edit(f"⏳ Indexing... (Stage 2)\nProcessed: {processed_stage2} files\nFound: {found_count} unique")
+                    try:
+                        await status.edit(f"⏳ Indexing... (Stage 2)\nProcessed: {processed_stage2} files\nFound: {found_count} unique")
+                    except FloodWait:
+                        pass
 
             save_index_db()
             await status.edit(f"🎉 Indexing Complete!\nChannel: `{src_name}`\nFound: **{found_count}** unique movies.\n\nDatabase ko `movie_database.json` me save kar diya hai.\nAb `/set_target` aur `/start_forward` chalaein.")
@@ -253,7 +259,6 @@ def set_mode(_, message):
     except:
         message.reply("❌ Usage: `/mode copy` or `/mode forward`")
 
-# Meet ki ab zaroorat nahi, kyunki index check karta hai
 @app.on_message(filters.command("meet"))
 def meet_cmd_removed(_, message):
     message.reply("ℹ️ `/meet` command ki ab zaroorat nahi hai.\n`/index` command ab source channel ko check kar leta hai.")
@@ -352,11 +357,14 @@ def start_forward(_, message):
                     continue
                 
                 if (forwarded_count % 25 == 0) or (processed_count % 100 == 0):
-                     await status.edit_text(
-                        f"✅ Fwd: `{forwarded_count}` / {(limit_messages or '∞')}, 🔍 Dup: `{duplicate_count}`\n"
-                        f"⏳ Processed: {processed_count} / {total_to_forward}",
-                        reply_markup=STOP_BUTTON
-                    )
+                    try:
+                        await status.edit_text(
+                            f"✅ Fwd: `{forwarded_count}` / {(limit_messages or '∞')}, 🔍 Dup: `{duplicate_count}`\n"
+                            f"⏳ Processed: {processed_count} / {total_to_forward}",
+                            reply_markup=STOP_BUTTON
+                        )
+                    except FloodWait:
+                        pass
 
                 if limit_messages and forwarded_count >= limit_messages:
                     is_forwarding = False
