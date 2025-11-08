@@ -413,7 +413,7 @@ async def index_target_cmd(_, message):
 
             # Stage 2: Documents (Files)
             async for m in app.search_messages(tgt_id, filter=enums.MessagesFilter.DOCUMENT, limit=0):
-                processed_s2 += 1
+                processed_stage2 += 1  # <-- Yahaan galti thi (processed_s2 -> processed_stage2)
                 try:
                     if not (m.document and m.document.mime_type and m.document.mime_type.startswith("video/")): continue
                     
@@ -428,8 +428,8 @@ async def index_target_cmd(_, message):
                         target_compound_keys_set.add(f"{file_name}-{file_size}")
                 except Exception as e: print(f"[INDEX_TGT S2 ERR] Msg {m.id}: {e}")
 
-                if processed_s2 % 500 == 0:
-                    try: await status.edit(f"⏳ Indexing Target Movies... (Stage 2)\nProcessed: {processed_s2} files\nFound: {len(target_unique_ids)} unique")
+                if processed_stage2 % 500 == 0: # <-- Yahaan galti thi (processed_s2 -> processed_stage2)
+                    try: await status.edit(f"⏳ Indexing Target Movies... (Stage 2)\nProcessed: {processed_stage2} files\nFound: {len(target_unique_ids)} unique")
                     except FloodWait: pass
             
             target_db_data = {
@@ -671,7 +671,7 @@ async def index_target_webseries_cmd(_, message):
 
             # Stage 2: Documents (Files)
             async for m in app.search_messages(tgt_id, filter=enums.MessagesFilter.DOCUMENT, limit=0):
-                processed_s2 += 1
+                processed_stage2 += 1 # <-- Yahaan galti thi (processed_s2 -> processed_stage2)
                 try:
                     if not (m.document and m.document.mime_type and m.document.mime_type.startswith("video/")): continue
                     
@@ -686,8 +686,8 @@ async def index_target_webseries_cmd(_, message):
                         target_compound_keys_set.add(f"{file_name}-{file_size}")
                 except Exception as e: print(f"[INDEX_TGT_WS S2 ERR] Msg {m.id}: {e}")
 
-                if processed_s2 % 500 == 0:
-                    try: await status.edit(f"⏳ Indexing Target Web Series... (Stage 2)\nProcessed: {processed_s2} files\nFound: {len(target_unique_ids)} unique")
+                if processed_stage2 % 500 == 0: # <-- Yahaan galti thi (processed_s2 -> processed_stage2)
+                    try: await status.edit(f"⏳ Indexing Target Web Series... (Stage 2)\nProcessed: {processed_stage2} files\nFound: {len(target_unique_ids)} unique")
                     except FloodWait: pass
             
             target_db_data = {
@@ -703,153 +703,6 @@ async def index_target_webseries_cmd(_, message):
 
         except Exception as e:
             await status.edit(f"❌ Target Web Series Indexing Error: `{e}`")
-
-    app.loop.create_task(runner())
-# ------------------------------------
-
-# --- NAYA COMMAND: /forward_webseries ---
-@app.on_message(filters.command("forward_webseries") & filters.create(only_admin))
-async def forward_webseries_cmd(_, message):
-    global forwarded_count, is_forwarding
-
-    if not os.path.exists(WEBSERIES_INDEX_DB_FILE):
-        await message.reply("❌ `webseries_database.json` file nahi mili. Pehle `/index_webseries <chat_id>` chalao.")
-        return
-
-    args = message.text.split(" ", 2)
-    if len(args) < 2:
-        await message.reply("❌ Usage:\n`/forward_webseries <target_chat_id> [limit]`")
-        return
-
-    target_ref = args[1].strip()
-    fwd_limit = None
-    if len(args) == 3:
-        try:
-            fwd_limit = int(args[2].strip())
-        except ValueError:
-            await message.reply("❌ Limit number hona chahiye.")
-            return
-
-    async def runner():
-        global forwarded_count, is_forwarding
-
-        try:
-            tgt_chat = await resolve_chat_id(app, target_ref)
-            tgt = tgt_chat.id
-            tgt_name = tgt_chat.title or tgt_chat.username
-        except Exception as e:
-            await message.reply(str(e))
-            return
-
-        try:
-            with open(WEBSERIES_INDEX_DB_FILE, "r", encoding="utf-8") as f:
-                webseries_list = json.load(f)
-        except Exception as e:
-            await message.reply(f"❌ Error loading `webseries_database.json`: {e}")
-            return
-            
-        load_webseries_duplicate_dbs()
-
-        is_forwarding = True
-        forwarded_count = 0
-        duplicate_count = 0
-        processed_count = 0
-        
-        total_in_index = len(webseries_list)
-        total_to_forward = fwd_limit or total_in_index
-
-        status = await message.reply(
-            f"⏳ **Sorted Web Series Forwarding** shuru ho raha hai...\n"
-            f"Target: `{tgt_name}`\n"
-            f"Total Episodes in Index: `{total_in_index}`\n"
-            f"Total Duplicates (Loaded): `{len(webseries_fwd_unique_ids)}` (IDs) + `{len(webseries_target_compound_keys)}` (Name+Size)",
-            reply_markup=STOP_BUTTON
-        )
-        
-        try:
-            for item in webseries_list:
-                if not is_forwarding: break
-                
-                processed_count += 1
-                message_id = item["message_id"]
-                src_id = item["chat_id"]
-                file_name = item.get("file_name")
-                file_size = item.get("file_size")
-                unique_id = item.get("file_unique_id")
-                compound_key = None
-                
-                if file_name and file_size is not None:
-                    compound_key = f"{file_name}-{file_size}"
-
-                try:
-                    # --- POWERFUL DUPLICATE CHECK ---
-                    if unique_id and unique_id in webseries_fwd_unique_ids:
-                        duplicate_count += 1
-                        continue
-                        
-                    if compound_key and compound_key in webseries_target_compound_keys:
-                        duplicate_count += 1
-                        continue
-                    # --- CHECK KHATAM ---
-                    
-                    if mode_copy:
-                        await app.copy_message(tgt, src_id, message_id)
-                    else:
-                        await app.forward_messages(tgt, src_id, message_id)
-                    
-                    save_forwarded_id(unique_id, compound_key, db_type="webseries") 
-                    forwarded_count += 1
-                    
-                    await asyncio.sleep(PER_MSG_DELAY) 
-                    
-                except FloodWait as e:
-                    await status.edit_text(f"⏳ FloodWait: sleeping {e.value}s…", reply_markup=STOP_BUTTON)
-                    await asyncio.sleep(e.value)
-                except (MessageIdInvalid, MessageAuthorRequired):
-                    print(f"[FWD_WS ERR] Skipping deleted/invalid msg {message_id}")
-                    continue
-                except RPCError as e:
-                    print(f"[FWD_WS RPCError] Skipping msg {message_id}: {e}")
-                    continue
-                except Exception as e:
-                    print(f"[FWD_WS ERROR] Skipping msg {message_id}: {e}")
-                    continue
-                
-                if (forwarded_count % 50 == 0) or (processed_count % 500 == 0):
-                    try:
-                        await status.edit_text(
-                            f"✅ Fwd: `{forwarded_count}` / {total_to_forward}, 🔍 Dup: `{duplicate_count}`\n"
-                            f"⏳ Processed: {processed_count} / {total_in_index}",
-                            reply_markup=STOP_BUTTON
-                        )
-                    except FloodWait: pass 
-
-                if forwarded_count > 0 and forwarded_count % BATCH_SIZE_FOR_BREAK == 0 and is_forwarding:
-                    try:
-                        await status.edit_text(
-                            f"✅ Fwd: `{forwarded_count}`. 5 batch complete.\n"
-                            f"☕ {BREAK_DURATION_SEC} second ka break le raha hoon...",
-                            reply_markup=STOP_BUTTON
-                        )
-                    except FloodWait: pass
-                    
-                    await asyncio.sleep(BREAK_DURATION_SEC) 
-                
-                if fwd_limit and forwarded_count >= fwd_limit:
-                    is_forwarding = False
-                    break
-
-        except Exception as e:
-            await status.edit_text(f"❌ Error: `{e}`", reply_markup=None)
-            is_forwarding = False
-            return
-
-        await status.edit_text(
-            f"🎉 **Web Series Forwarding Complete!**\n"
-            f"✅ Total Forwarded: `{forwarded_count}`\n"
-            f"🔍 Duplicates Skipped: `{duplicate_count}`",
-            reply_markup=None
-        )
 
     app.loop.create_task(runner())
 # ------------------------------------
@@ -876,13 +729,13 @@ async def clean_dupes_cmd(_, message):
         
         seen_movies = {} # Key: "name-size", Value: message_id
         messages_to_delete = []
-        processed_s1 = 0
-        processed_s2 = 0
+        processed_stage1 = 0
+        processed_stage2 = 0
 
         try:
             # Stage 1: Videos
             async for m in app.search_messages(chat_id, filter=enums.MessagesFilter.VIDEO, limit=0):
-                processed_s1 += 1
+                processed_stage1 += 1
                 try:
                     file_name, file_size, unique_id = get_media_details(m)
                     if not file_name or not file_size: continue
@@ -895,15 +748,15 @@ async def clean_dupes_cmd(_, message):
                         seen_movies[compound_key] = m.id # First time
                 except Exception as e: print(f"[CLEAN S1 ERR] Msg {m.id}: {e}")
                 
-                if processed_s1 % 500 == 0:
-                    try: await status.edit(f"⏳ Scanning... (Stage 1)\nProcessed: {processed_s1} videos\nFound: {len(messages_to_delete)} duplicates")
+                if processed_stage1 % 500 == 0:
+                    try: await status.edit(f"⏳ Scanning... (Stage 1)\nProcessed: {processed_stage1} videos\nFound: {len(messages_to_delete)} duplicates")
                     except FloodWait: pass
 
             # Stage 2: Documents
-            await status.edit(f"⏳ Scanning... (Stage 2: Files)\nProcessed: {processed_s1} videos\nFound: {len(messages_to_delete)} duplicates")
+            await status.edit(f"⏳ Scanning... (Stage 2: Files)\nProcessed: {processed_stage1} videos\nFound: {len(messages_to_delete)} duplicates")
             
             async for m in app.search_messages(chat_id, filter=enums.MessagesFilter.DOCUMENT, limit=0):
-                processed_s2 += 1
+                processed_stage2 += 1 # <-- Yahaan galti thi (processed_s2 -> processed_stage2)
                 try:
                     if not (m.document and m.document.mime_type and m.document.mime_type.startswith("video/")): continue
                     file_name, file_size, unique_id = get_media_details(m)
@@ -917,8 +770,8 @@ async def clean_dupes_cmd(_, message):
                         seen_movies[compound_key] = m.id
                 except Exception as e: print(f"[CLEAN S2 ERR] Msg {m.id}: {e}")
 
-                if processed_s2 % 500 == 0:
-                    try: await status.edit(f"⏳ Scanning... (Stage 2)\nProcessed: {processed_s2} files\nFound: {len(messages_to_delete)} duplicates")
+                if processed_stage2 % 500 == 0: # <-- Yahaan galti thi (processed_s2 -> processed_stage2)
+                    try: await status.edit(f"⏳ Scanning... (Stage 2)\nProcessed: {processed_stage2} files\nFound: {len(messages_to_delete)} duplicates")
                     except FloodWait: pass
 
             # Deletion Phase
@@ -981,13 +834,13 @@ async def find_bad_quality_cmd(_, message):
         status = await message.reply(f"⏳ **Bad Quality Finder**\nScanning `{chat_name}` for low-quality keywords...\n(Stage 1: Videos)")
         
         bad_quality_movies_list = []
-        processed_s1 = 0
-        processed_s2 = 0
+        processed_stage1 = 0
+        processed_stage2 = 0
 
         try:
             # Stage 1: Videos
             async for m in app.search_messages(chat_id, filter=enums.MessagesFilter.VIDEO, limit=0):
-                processed_s1 += 1
+                processed_stage1 += 1
                 try:
                     file_name, file_size, unique_id = get_media_details(m)
                     text_to_check = (file_name or "") + " " + (m.caption or "")
@@ -1003,15 +856,15 @@ async def find_bad_quality_cmd(_, message):
                         })
                 except Exception as e: print(f"[FIND BQ S1 ERR] Msg {m.id}: {e}")
                 
-                if processed_s1 % 500 == 0:
-                    try: await status.edit(f"⏳ Scanning... (Stage 1)\nProcessed: {processed_s1} videos\nFound: {len(bad_quality_movies_list)} bad quality movies")
+                if processed_stage1 % 500 == 0:
+                    try: await status.edit(f"⏳ Scanning... (Stage 1)\nProcessed: {processed_stage1} videos\nFound: {len(bad_quality_movies_list)} bad quality movies")
                     except FloodWait: pass
 
-            await status.edit(f"⏳ Scanning... (Stage 2: Files)\nProcessed: {processed_s1} videos\nFound: {len(bad_quality_movies_list)} bad quality movies")
+            await status.edit(f"⏳ Scanning... (Stage 2: Files)\nProcessed: {processed_stage1} videos\nFound: {len(bad_quality_movies_list)} bad quality movies")
             
             # Stage 2: Documents
             async for m in app.search_messages(chat_id, filter=enums.MessagesFilter.DOCUMENT, limit=0):
-                processed_s2 += 1
+                processed_stage2 += 1 # <-- Yahaan galti thi (processed_s2 -> processed_stage2)
                 try:
                     if not (m.document and m.document.mime_type and m.document.mime_type.startswith("video/")): continue
                     
@@ -1029,8 +882,8 @@ async def find_bad_quality_cmd(_, message):
                         })
                 except Exception as e: print(f"[FIND BQ S2 ERR] Msg {m.id}: {e}")
 
-                if processed_s2 % 500 == 0:
-                    try: await status.edit(f"⏳ Scanning... (Stage 2)\nProcessed: {processed_s2} files\nFound: {len(bad_quality_movies_list)} bad quality movies")
+                if processed_stage2 % 500 == 0: # <-- Yahaan galti thi (processed_s2 -> processed_stage2)
+                    try: await status.edit(f"⏳ Scanning... (Stage 2)\nProcessed: {processed_stage2} files\nFound: {len(bad_quality_movies_list)} bad quality movies")
                     except FloodWait: pass
             
             with open(BAD_QUALITY_DB_FILE, "w", encoding="utf-8") as f:
