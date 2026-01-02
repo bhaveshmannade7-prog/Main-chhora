@@ -881,7 +881,7 @@ async def index_target_webseries_cmd(_, message):
     app.loop.create_task(runner())
 
 # --- NAYA: Full Forward Commands ---
-
+# --- YE NAYA CODE PASTE KAREIN ---
 @app.on_message(filters.command("index_full") & filters.create(only_admin))
 async def index_full_cmd(_, message):
     global GLOBAL_TASK_RUNNING
@@ -908,25 +908,32 @@ async def index_full_cmd(_, message):
                 await message.reply(str(e))
                 return
             
-            status = await message.reply(f"⏳ **Full Indexing** shuru ho raha hai: `{src_name}`...\n(Sabhi videos/files index honge)\n(Stage 1: Videos)")
+            status = await message.reply(f"⏳ **Full Indexing** shuru ho raha hai: `{src_name}`...\n(Method: Chat History Scan - 100% Accurate)")
 
-            processed_stage1 = 0
-            processed_stage2 = 0
+            processed_count = 0
             found_count = 0
             temp_media_list = []
-            indexed_ids = set() # Avoid duplicates within index
+            indexed_ids = set()
             
             try:
-                # Stage 1: Videos
-                async for m in app.search_messages(src_id, filter=enums.MessagesFilter.VIDEO, limit=0):
+                # Single Pass: Scan Full Chat History (More Accurate than search_messages)
+                async for m in app.get_chat_history(src_id):
                     if not GLOBAL_TASK_RUNNING:
                         await status.edit("🛑 Task stopped by user.")
                         break
                     
-                    processed_stage1 += 1
+                    processed_count += 1
+                    
                     try:
+                        # Media details check karein
                         file_name, file_size, unique_id = get_media_details(m)
-                        if not unique_id or unique_id in indexed_ids: continue 
+                        
+                        # Agar media nahi hai ya Duplicate hai -> Skip
+                        if not unique_id or unique_id in indexed_ids: 
+                            if processed_count % 1000 == 0:
+                                try: await status.edit(f"⏳ Scanning History...\nChecked: {processed_count} msgs\nFound: {found_count} media")
+                                except FloodWait: pass
+                            continue 
                         
                         temp_media_list.append({
                             "message_id": m.id,
@@ -937,42 +944,13 @@ async def index_full_cmd(_, message):
                         })
                         indexed_ids.add(unique_id)
                         found_count += 1
-                    except Exception as e: print(f"[INDEX_FULL S1 ERR] Msg {m.id}: {e}")
+
+                    except Exception as e: 
+                        print(f"[INDEX_FULL ERR] Msg {m.id}: {e}")
                     
-                    if processed_stage1 % 500 == 0:
-                        try: await status.edit(f"⏳ Indexing All Media... (Stage 1)\nProcessed: {processed_stage1} videos\nFound: {found_count} media")
+                    if processed_count % 500 == 0:
+                        try: await status.edit(f"⏳ Scanning History...\nChecked: {processed_count} msgs\nFound: {found_count} media")
                         except FloodWait: pass 
-                
-                if not GLOBAL_TASK_RUNNING: return
-
-                await status.edit(f"⏳ Indexing All Media... (Stage 2: Files)\nProcessed: {processed_stage1} videos\nFound: {found_count} media")
-
-                # Stage 2: Documents (Files)
-                async for m in app.search_messages(src_id, filter=enums.MessagesFilter.DOCUMENT, limit=0):
-                    if not GLOBAL_TASK_RUNNING:
-                        await status.edit("🛑 Task stopped by user.")
-                        break
-                    
-                    processed_stage2 += 1
-                    try:
-                        # FIX: Removed the mime-type check that was causing missing movies
-                        file_name, file_size, unique_id = get_media_details(m)
-                        if not unique_id or unique_id in indexed_ids: continue
-                        
-                        temp_media_list.append({
-                            "message_id": m.id,
-                            "chat_id": src_id,
-                            "file_name": file_name,
-                            "file_size": file_size,
-                            "file_unique_id": unique_id
-                        })
-                        indexed_ids.add(unique_id)
-                        found_count += 1
-                    except Exception as e: print(f"[INDEX_FULL S2 ERR] Msg {m.id}: {e}")
-
-                    if processed_stage2 % 500 == 0:
-                        try: await status.edit(f"⏳ Indexing All Media... (Stage 2)\nProcessed: {processed_stage2} files\nFound: {found_count} media")
-                        except FloodWait: pass
                 
                 if not GLOBAL_TASK_RUNNING: return
 
@@ -998,7 +976,9 @@ async def index_full_cmd(_, message):
             GLOBAL_TASK_RUNNING = False
 
     app.loop.create_task(runner())
-
+ 
+                
+                
 @app.on_message(filters.command("index_target_full") & filters.create(only_admin))
 async def index_target_full_cmd(_, message):
     global GLOBAL_TASK_RUNNING
