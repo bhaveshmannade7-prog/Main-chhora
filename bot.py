@@ -654,7 +654,7 @@ async def index_webseries_cmd(_, message):
             found_count = 0
             temp_webseries_list = []
             
-                        try:
+             try:
                 # Single Pass: Scan Full Chat History (More Accurate)
                 processed_count = 0
                 
