@@ -653,47 +653,44 @@ async def index_webseries_cmd(_, message):
             found_count = 0
             temp_webseries_list = []
             
-            try:
-                # Stage 1: Videos
-                async for m in app.search_messages(src_id, filter=enums.MessagesFilter.VIDEO, limit=0):
+                        try:
+                # Single Pass: Scan Full Chat History (More Accurate)
+                processed_count = 0
+                
+                async for m in app.get_chat_history(src_id):
                     if not GLOBAL_TASK_RUNNING:
                         await status.edit("🛑 Task stopped by user.")
                         break
                     
-                    processed_stage1 += 1
+                    processed_count += 1
+                    
                     try:
+                        # Check logic using existing helper
                         file_name, file_size, unique_id = get_media_details(m)
-                        if not unique_id: continue 
                         
-                        text_to_check = (file_name or "") + " " + (m.caption or "")
-                        if not SERIES_KEYWORDS_REGEX.search(text_to_check):
-                            continue
+                        # Agar media nahi hai (Text msg) ya Duplicate hai -> Skip
+                        if not unique_id or unique_id in indexed_ids: 
+                            # Optional: Status update every 1000 msgs even if no media found
+                            if processed_count % 1000 == 0:
+                                try: await status.edit(f"⏳ Scanning History...\nChecked: {processed_count} msgs\nFound: {found_count} media")
+                                except FloodWait: pass
+                            continue 
                         
-                        series_name, season_num, ep_start, ep_end = parse_series_info(text_to_check)
-                        if not series_name:
-                            if SIMPLE_SEASON_REGEX.search(text_to_check):
-                                 series_name = file_name or "Unknown Series"
-                                 season_num = 1
-                                 ep_start = 1
-                            else:
-                                 continue 
-                        
-                        temp_webseries_list.append({
-                            "series_name": series_name,
-                            "season_num": season_num,
-                            "episode_num": ep_start,
-                            "episode_end_num": ep_end,
+                        temp_media_list.append({
                             "message_id": m.id,
                             "chat_id": src_id,
                             "file_name": file_name,
                             "file_size": file_size,
                             "file_unique_id": unique_id
                         })
+                        indexed_ids.add(unique_id)
                         found_count += 1
-                    except Exception as e: print(f"[INDEX_WS S1 ERR] Msg {m.id}: {e}")
+
+                    except Exception as e: 
+                        print(f"[INDEX_FULL ERR] Msg {m.id}: {e}")
                     
-                    if processed_stage1 % 500 == 0:
-                        try: await status.edit(f"⏳ Indexing Web Series... (Stage 1)\nProcessed: {processed_stage1} videos\nFound: {found_count} episodes")
+                    if processed_count % 500 == 0:
+                        try: await status.edit(f"⏳ Scanning History...\nChecked: {processed_count} msgs\nFound: {found_count} media")
                         except FloodWait: pass 
                 
                 if not GLOBAL_TASK_RUNNING: return
