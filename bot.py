@@ -359,7 +359,7 @@ async def start_cmd(_, message):
     await message.reply(START_MESSAGE, disable_web_page_preview=True)
 
 def get_media_details(m):
-    # Audio bhi add kar diya taki music file wali movies bhi pakad le
+    # Yahan 'm.audio' add kiya hai taki audio files bhi detect hon
     media = m.video or m.document or m.audio
     if not media:
         return None, None, None
