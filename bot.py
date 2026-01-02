@@ -917,9 +917,8 @@ async def index_full_cmd(_, message):
             found_count = 0
             temp_media_list = []
             indexed_ids = set() # Avoid duplicates within index
-            
-                        try:
-                # Deep Scan for everything
+        
+            try:    # Deep Scan for everything
                 async for m in app.get_chat_history(src_id):
                     if not GLOBAL_TASK_RUNNING:
                         await status.edit("🛑 Task stopped by user.")
