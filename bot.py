@@ -621,7 +621,8 @@ def parse_series_info(text):
         
     return None, 0, 0, 0
 
-@app.on_message(filters.command("index_webseries") & filters.create(only_admin))
+ SIMPLE_SEASON_REGEX.search(text_to_check):
+ @app.on_message(filters.command("index_webseries") & filters.create(only_admin))
 async def index_webseries_cmd(_, message):
     global GLOBAL_TASK_RUNNING
     if GLOBAL_TASK_RUNNING:
@@ -647,17 +648,15 @@ async def index_webseries_cmd(_, message):
                 await message.reply(str(e))
                 return
             
-            status = await message.reply(f"⏳ Web Series Indexing & Sorting shuru ho raha hai: `{src_name}`...\n(Yeh movies ko skip kar dega)\n(Stage 1: Videos)")
+            status = await message.reply(f"⏳ **Web Series Indexing** shuru ho raha hai: `{src_name}`...\n(Method: Chat History Scan - 100% Accurate)")
 
-            processed_stage1 = 0
-            processed_stage2 = 0
+            processed_count = 0
             found_count = 0
             temp_webseries_list = []
+            local_indexed_ids = set() # Duplicates avoid karne ke liye
             
-        try:
-                # Single Pass: Scan Full Chat History (More Accurate)
-                processed_count = 0
-                
+            try:
+                # Single Pass: Scan Full Chat History (Web Series Logic)
                 async for m in app.get_chat_history(src_id):
                     if not GLOBAL_TASK_RUNNING:
                         await status.edit("🛑 Task stopped by user.")
@@ -666,54 +665,21 @@ async def index_webseries_cmd(_, message):
                     processed_count += 1
                     
                     try:
-                        # Check logic using existing helper
+                        # 1. Media Check
                         file_name, file_size, unique_id = get_media_details(m)
-                        
-                        # Agar media nahi hai (Text msg) ya Duplicate hai -> Skip
-                        if not unique_id or unique_id in indexed_ids: 
-                            # Optional: Status update every 1000 msgs even if no media found
+                        if not unique_id or unique_id in local_indexed_ids: 
+                            # Progress update for text messages/duplicates
                             if processed_count % 1000 == 0:
-                                try: await status.edit(f"⏳ Scanning History...\nChecked: {processed_count} msgs\nFound: {found_count} media")
+                                try: await status.edit(f"⏳ Scanning Web Series...\nChecked: {processed_count} msgs\nFound: {found_count} episodes")
                                 except FloodWait: pass
                             continue 
                         
-                        temp_media_list.append({
-                            "message_id": m.id,
-                            "chat_id": src_id,
-                            "file_name": file_name,
-                            "file_size": file_size,
-                            "file_unique_id": unique_id
-                        })
-                        indexed_ids.add(unique_id)
-                        found_count += 1
-
-                    except Exception as e: 
-                        print(f"[INDEX_FULL ERR] Msg {m.id}: {e}")
-                    
-                    if processed_count % 500 == 0:
-                        try: await status.edit(f"⏳ Scanning History...\nChecked: {processed_count} msgs\nFound: {found_count} media")
-                        except FloodWait: pass 
-                
-                if not GLOBAL_TASK_RUNNING: return
-
-                await status.edit(f"⏳ Indexing Web Series... (Stage 2: Files)\nProcessed: {processed_stage1} videos\nFound: {found_count} episodes")
-
-                # Stage 2: Documents (Files)
-                async for m in app.search_messages(src_id, filter=enums.MessagesFilter.DOCUMENT, limit=0):
-                    if not GLOBAL_TASK_RUNNING:
-                        await status.edit("🛑 Task stopped by user.")
-                        break
-                    
-                    processed_stage2 += 1
-                    try:
-                        # FIX: Removed strict video mime check
-                        file_name, file_size, unique_id = get_media_details(m)
-                        if not unique_id: continue
-
+                        # 2. Check if it is a Series (Season/Episode keyword)
                         text_to_check = (file_name or "") + " " + (m.caption or "")
                         if not SERIES_KEYWORDS_REGEX.search(text_to_check):
                             continue
-
+                        
+                        # 3. Parse Info
                         series_name, season_num, ep_start, ep_end = parse_series_info(text_to_check)
                         if not series_name:
                              if SIMPLE_SEASON_REGEX.search(text_to_check):
@@ -723,6 +689,7 @@ async def index_webseries_cmd(_, message):
                              else:
                                  continue
                         
+                        # 4. Add to List
                         temp_webseries_list.append({
                             "series_name": series_name,
                             "season_num": season_num,
@@ -734,17 +701,21 @@ async def index_webseries_cmd(_, message):
                             "file_size": file_size,
                             "file_unique_id": unique_id
                         })
+                        local_indexed_ids.add(unique_id)
                         found_count += 1
-                    except Exception as e: print(f"[INDEX_WS S2 ERR] Msg {m.id}: {e}")
 
-                    if processed_stage2 % 500 == 0:
-                        try: await status.edit(f"⏳ Indexing Web Series... (Stage 2)\nProcessed: {processed_stage2} files\nFound: {found_count} episodes")
-                        except FloodWait: pass
+                    except Exception as e: 
+                        print(f"[INDEX_WS ERR] Msg {m.id}: {e}")
+                    
+                    if processed_count % 500 == 0:
+                        try: await status.edit(f"⏳ Scanning Web Series...\nChecked: {processed_count} msgs\nFound: {found_count} episodes")
+                        except FloodWait: pass 
                 
                 if not GLOBAL_TASK_RUNNING: return
 
-                await status.edit(f"⏳ Scan complete. Found {found_count} episodes.\nAb sorting shuru kar raha hoon (line se jama raha hoon)...")
+                await status.edit(f"⏳ Scan complete. Found {found_count} episodes.\nAb sorting shuru kar raha hoon (Series Name -> Season -> Episode)...")
                 
+                # Sorting Logic
                 sorted_webseries_list = sorted(
                     temp_webseries_list, 
                     key=lambda x: (
@@ -754,8 +725,6 @@ async def index_webseries_cmd(_, message):
                     )
                 )
                 
-                if not GLOBAL_TASK_RUNNING: return
-
                 try:
                     with open(WEBSERIES_INDEX_DB_FILE, "w", encoding="utf-8") as f:
                         json.dump(sorted_webseries_list, f, indent=2, ensure_ascii=False)
@@ -763,7 +732,7 @@ async def index_webseries_cmd(_, message):
                     await status.edit(f"❌ Database save nahi kar paaya: {e}")
                     return
 
-                await status.edit(f"🎉 Web Series Indexing & Sorting Complete!\nChannel: `{src_name}`\nFound: **{found_count}** total episodes.\n\nSorted database ko `webseries_database.json` me save kar diya hai.")
+                await status.edit(f"🎉 **Web Series Indexing & Sorting Complete!**\nChannel: `{src_name}`\nFound: **{found_count}** total episodes.\n\nDatabase: `webseries_database.json`")
 
             except Exception as e:
                 if status: await status.edit(f"❌ Web Series Indexing Error: `{e}`")
@@ -771,7 +740,6 @@ async def index_webseries_cmd(_, message):
             GLOBAL_TASK_RUNNING = False
 
     app.loop.create_task(runner())
-
 @app.on_message(filters.command("index_target_webseries") & filters.create(only_admin))
 async def index_target_webseries_cmd(_, message):
     global GLOBAL_TASK_RUNNING
