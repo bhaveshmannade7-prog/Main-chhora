@@ -11,13 +11,16 @@ from pyrogram.errors import (
 )
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
-SESSION_STRING = os.getenv("SESSION_STRING")
+SESSION_1 = os.getenv("SESSION_STRING_1")
+SESSION_2 = os.getenv("SESSION_STRING_2")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
-# Session via string (Pyrogram v2)
-app = Client("user", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
+# Dual Clients
+app1 = Client("boss", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_1)
+app2 = Client("worker", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_2)
+
+# Global app variable for easy command registration (Boss is the listener)
+app = app1 
 
 # --- Runtime state ---
 target_channel = None
