@@ -2,252 +2,258 @@ import os
 import asyncio
 import json
 import re
-from pyrogram import Client, filters, errors
-from pyrogram.errors import FloodWait
-from pyrogram.types import Message
+from pyrogram import Client, filters, enums
+from pyrogram.errors import FloodWait, RPCError
+from flask import Flask
+from threading import Thread
 
-# ================= CONFIGURATION =================
+# ==============================
+# CONFIGURATION & ENV VARS
+# ==============================
+# Render ke Dashboard me ye Vars zaroor add karna
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
 SESSION_STRING = os.getenv("SESSION_STRING", "")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 app = Client(
-    "MazaMovieBot",
+    "MazaMovieUserBot",
     api_id=API_ID,
     api_hash=API_HASH,
     session_string=SESSION_STRING
 )
 
-# ================= GLOBAL STATES =================
+# ==============================
+# GLOBAL STATE & LOCKS
+# ==============================
 IS_BUSY = False
 STOP_TASKS = False
 
-# DB File Names
-DB_FILES = {
-    "src_full": "full_source_index.json",
-    "src_movie": "movie_source_index.json",
-    "src_series": "webseries_source_index.json",
-    "tgt_full": "full_target_index.json",
-    "tgt_movie": "movie_target_index.json",
-    "tgt_series": "webseries_target_index.json"
-}
+# Smart Web Series Regex
+SERIES_REGEX = r"(?i)(.*?)[\s\.\-_]*[sS](\d{1,2})[\s\.\-_]*[eE](\d{1,3})|(?i)(.*?)[\s\.\-_]*Season[\s\.\-_]*(\d{1,2})[\s\.\-_]*Episode[\s\.\-_]*(\d{1,3})"
 
-# ================= UTILS & HELPERS =================
+# ==============================
+# RENDER HEALTH CHECK SERVER
+# ==============================
+# Ye Render ke "No open ports detected" error ko fix karega
+flask_app = Flask(__name__)
 
-def load_db(filename):
+@flask_app.route('/')
+def health_check():
+    return "UserBot is Running 24/7!"
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 8080))
+    flask_app.run(host='0.0.0.0', port=port)
+
+# ==============================
+# DATABASE UTILS (JSON)
+# ==============================
+
+def save_json(data, filename):
+    with open(filename, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=4)
+
+def load_json(filename):
     if os.path.exists(filename):
-        with open(filename, "r") as f:
+        with open(filename, 'r', encoding='utf-8') as f:
             return json.load(f)
     return []
 
-def save_db(filename, data):
-    with open(filename, "w") as f:
-        json.dump(data, f, indent=2)
+def get_file_details(msg):
+    """Sirf Video aur Documents extract karne ke liye"""
+    if msg.video:
+        return msg.video.file_unique_id, msg.video.file_name or "video.mp4", msg.video.file_size
+    if msg.document:
+        return msg.document.file_unique_id, msg.document.file_name or "file.mkv", msg.document.file_size
+    return None, None, None
 
-def get_file_info(message: Message):
-    """Extract file info: video or document only."""
-    obj = message.video or message.document
-    if not obj:
-        return None
-    return {
-        "msg_id": message.id,
-        "unique_id": obj.file_unique_id,
-        "name": getattr(obj, "file_name", "None"),
-        "size": obj.file_size,
-        "caption": message.caption or ""
-    }
+def parse_series(caption):
+    """Caption se Series Title, Season, aur Episode nikalne ke liye"""
+    if not caption: return None
+    match = re.search(SERIES_REGEX, caption)
+    if match:
+        title = match.group(1) or match.group(4)
+        season = int(match.group(2) or match.group(5))
+        episode = int(match.group(3) or match.group(6))
+        return {"title": title.strip().lower(), "season": season, "episode": episode}
+    return None
 
-def clean_title(caption):
-    """Smartly cleans title for grouping."""
-    if not caption: return "Unknown"
-    # Remove Season/Episode patterns to get base title
-    clean = re.split(r'(?i)(S\d+|Season\s*\d+|E\d+|Episode\s*\d+|Complete)', caption)[0]
-    return clean.strip().lower()
+# ==============================
+# CORE COMMANDS
+# ==============================
 
-def parse_series_info(caption):
-    """Identify Season and Episode numbers."""
-    s_match = re.search(r'(?i)S(\d+)|Season\s*(\d+)', caption)
-    e_match = re.search(r'(?i)E(\d+)|Episode\s*(\d+)', caption)
-    season = int(s_match.group(1) or s_match.group(2)) if s_match else 0
-    episode = int(e_match.group(1) or e_match.group(2)) if e_match else 0
-    is_complete = "complete" in caption.lower()
-    return season, episode, is_complete
-
-# ================= COMMAND LOCK DECORATOR =================
-
-def lock_handler(func):
-    async def wrapper(client, message):
-        global IS_BUSY, STOP_TASKS
-        if message.from_user.id != ADMIN_ID:
-            return
-        if IS_BUSY and message.text != "/stop_all":
-            await message.reply("⛔ Bot busy hai, pehle wala kaam complete hone do ya `/stop_all` karo.")
-            return
-        await func(client, message)
-    return wrapper
-
-# ================= CORE LOGIC =================
-
-async def perform_indexing(message, chat_id, db_key, filter_type=None):
-    global IS_BUSY, STOP_TASKS
-    IS_BUSY = True
-    STOP_TASKS = False
-    
-    status = await message.reply(f"🔍 Indexing chalu ho rahi hai: `{chat_id}`...")
-    data = []
-    count = 0
-
-    try:
-        async for msg in app.get_chat_history(chat_id):
-            if STOP_TASKS:
-                await message.reply("🛑 Task manually stop kar diya gaya.")
-                break
-            
-            file_data = get_file_info(msg)
-            if not file_data:
-                continue
-
-            cap = file_data['caption'].lower()
-            
-            # Smart Filtering Logic
-            if filter_type == "movie":
-                if any(x in cap for x in ["s0", "season", "episode", "e0"]): continue
-            elif filter_type == "series":
-                if not any(x in cap for x in ["s0", "season", "episode", "e0", "complete"]): continue
-
-            data.append(file_data)
-            count += 1
-            if count % 500 == 0:
-                await status.edit(f"📂 Indexing in progress...\nFound: `{count}` files.")
-
-        save_db(DB_FILES[db_key], data)
-        await status.edit(f"✅ Indexing Complete!\nTotal Files: `{count}`\nSaved to: `{DB_FILES[db_key]}`")
-
-    except Exception as e:
-        await message.reply(f"❌ Error: {str(e)}")
-    finally:
-        IS_BUSY = False
-
-# ================= FORWARDING LOGIC =================
-
-async def smart_forwarder(message, target_chat, src_db_key, tgt_db_key, mode="full", limit=None):
-    global IS_BUSY, STOP_TASKS
-    IS_BUSY = True
-    STOP_TASKS = False
-
-    source_data = load_db(DB_FILES[src_db_key])
-    target_data = load_db(DB_FILES[tgt_db_key])
-    target_uniques = {x['unique_id'] for x in target_data}
-    target_names = { (x['name'], x['size']) for x in target_data }
-
-    if limit: source_data = source_data[:int(limit)]
-    
-    # Sorting for Web Series
-    if mode == "series":
-        source_data.sort(key=lambda x: (clean_title(x['caption']), parse_series_info(x['caption'])))
-
-    status = await message.reply("🚀 Forwarding chalu ho rahi hai...")
-    
-    count = 0
-    batch_count = 0
-
-    for item in source_data:
-        if STOP_TASKS: break
-        
-        # Duplicate Check
-        if item['unique_id'] in target_uniques or (item['name'], item['size']) in target_names:
-            continue
-
-        try:
-            await app.copy_message(
-                chat_id=target_chat,
-                from_chat_id=message.reply_to_message.chat.id if message.reply_to_message else message.chat.id, 
-                message_id=item['msg_id']
-            )
-            count += 1
-            batch_count += 1
-            
-            if count % 10 == 0:
-                await status.edit(f"✅ Forwarding...\nDone: `{count}`\nSkipping duplicates...")
-
-            # Safety Rules
-            if batch_count >= 100:
-                await status.edit("⏳ 100 files done. Taking 25s safety break...")
-                await asyncio.sleep(25)
-                batch_count = 0
-            else:
-                await asyncio.sleep(1.5) # Flood protection base delay
-
-        except FloodWait as e:
-            await asyncio.sleep(e.value + 5)
-        except Exception:
-            continue
-
-    await status.edit(f"🏁 Task Finished!\nTotal Forwarded: `{count}`")
-    IS_BUSY = False
-
-# ================= HANDLERS =================
+@app.on_message(filters.command("start") & filters.user(ADMIN_ID))
+async def start_handler(client, message):
+    await message.reply_text(
+        "⚡ **UserBot Online Hai!**\n\n"
+        "Main Commands:\n"
+        "• `/index_full @channel` - Sab files index karein\n"
+        "• `/forward_full @target` - Forwarding shuru karein\n"
+        "• `/stop_all` - Sab kuch rokne ke liye"
+    )
 
 @app.on_message(filters.command("stop_all") & filters.user(ADMIN_ID))
-async def stop_all_handler(_, message):
+async def stop_handler(client, message):
     global STOP_TASKS, IS_BUSY
     STOP_TASKS = True
     IS_BUSY = False
-    await message.reply("🛑 Saare tasks rok diye gaye hain aur Lock release kar diya gaya hai.")
+    await message.reply_text("🛑 **STOP command receive ho gaya!** Lock khul gaya hai.")
 
-@app.on_message(filters.command(["index_full", "index_movies", "index_webseries"]) & filters.me)
-@lock_handler
-async def start_src_index(client, message):
-    cmd = message.command[0]
+# ==============================
+# INDEXING SYSTEM
+# ==============================
+
+@app.on_message(filters.command(["index_full", "index_movies", "index_webseries"]) & filters.user(ADMIN_ID))
+async def index_logic(client, message):
+    global IS_BUSY, STOP_TASKS
+    if IS_BUSY:
+        return await message.reply_text("⛔ Bot pehle se ek task kar raha hai!")
+
     if len(message.command) < 2:
-        return await message.reply("Format: `/index_xxx <chat_id/username>`")
-    
-    chat = message.command[1]
-    f_type = "movie" if "movies" in cmd else "series" if "webseries" in cmd else None
-    db_key = f"src_{'movie' if f_type=='movie' else 'series' if f_type=='series' else 'full'}"
-    
-    await perform_indexing(message, chat, db_key, f_type)
+        return await message.reply_text("Usage: `/index_full @source_channel`")
 
-@app.on_message(filters.command(["index_target_full", "index_target_movies", "index_target_webseries"]) & filters.me)
-@lock_handler
-async def start_tgt_index(client, message):
+    source_chat = message.command[1]
     cmd = message.command[0]
-    if len(message.command) < 2:
-        return await message.reply("Format: `/index_target_xxx <chat_id/username>`")
     
-    chat = message.command[1]
-    f_type = "movie" if "movies" in cmd else "series" if "webseries" in cmd else None
-    db_key = f"tgt_{'movie' if f_type=='movie' else 'series' if f_type=='series' else 'full'}"
-    
-    await perform_indexing(message, chat, db_key, f_type)
+    # Decide filename and mode
+    fname = "full_source_index.json"
+    mode = "all"
+    if "movies" in cmd:
+        fname, mode = "movie_source_index.json", "movies"
+    elif "webseries" in cmd:
+        fname, mode = "webseries_source_index.json", "webseries"
 
-@app.on_message(filters.command(["forward_full", "forward_movies", "forward_webseries"]) & filters.me)
-@lock_handler
-async def start_forward(client, message):
-    if len(message.command) < 2:
-        return await message.reply("Format: `/forward_xxx <target_chat> [limit]`")
+    IS_BUSY = True
+    STOP_TASKS = False
+    data = []
+    count = 0
     
+    status = await message.reply_text(f"🔍 **Indexing {mode} shuru ho rahi hai...**")
+
+    try:
+        # get_chat_history use kar rahe hain high performance ke liye
+        async for msg in client.get_chat_history(source_chat):
+            if STOP_TASKS: break
+            
+            f_id, f_name, f_size = get_file_details(msg)
+            if not f_id: continue
+
+            series = parse_series(msg.caption)
+            if mode == "movies" and series: continue
+            if mode == "webseries" and not series: continue
+
+            data.append({
+                "msg_id": msg.id,
+                "file_unique_id": f_id,
+                "file_name": f_name,
+                "file_size": f_size,
+                "caption": msg.caption or "",
+                "series_info": series,
+                "source_chat": source_chat
+            })
+            
+            count += 1
+            if count % 1000 == 0:
+                await status.edit(f"📂 **Indexed:** {count} files...")
+
+        save_json(data, fname)
+        await status.edit(f"✅ **Indexing Khatam!**\nTotal: `{count}` files saved in `{fname}`")
+
+    except Exception as e:
+        await message.reply_text(f"❌ Error: {str(e)}")
+    finally:
+        IS_BUSY = False
+
+# ==============================
+# FORWARDING SYSTEM
+# ==============================
+
+@app.on_message(filters.command(["forward_full", "forward_movies", "forward_webseries"]) & filters.user(ADMIN_ID))
+async def forward_logic(client, message):
+    global IS_BUSY, STOP_TASKS
+    if IS_BUSY: return await message.reply_text("⛔ Bot busy hai!")
+    
+    if len(message.command) < 2:
+        return await message.reply_text("Usage: `/forward_full @target_channel`")
+
+    target_chat = message.command[1]
     cmd = message.command[0]
-    target = message.command[1]
-    limit = message.command[2] if len(message.command) > 2 else None
     
-    mode = "movie" if "movies" in cmd else "series" if "webseries" in cmd else "full"
-    src_key = f"src_{mode}"
-    tgt_key = f"tgt_{mode}"
+    # Files Load Karein
+    s_file = "full_source_index.json"
+    t_file = "full_target_index.json"
+    if "movies" in cmd:
+        s_file, t_file = "movie_source_index.json", "movie_target_index.json"
+    elif "webseries" in cmd:
+        s_file, t_file = "webseries_source_index.json", "webseries_target_index.json"
+
+    source_data = load_json(s_file)
+    target_data = load_json(t_file)
     
-    await smart_forwarder(message, target, src_key, tgt_key, mode, limit)
+    if not source_data:
+        return await message.reply_text("❌ Source index khali hai!")
 
-@app.on_message(filters.command("start") & filters.me)
-async def start_msg(_, message):
-    await message.reply("🔥 **Maza Movie Indexer UserBot Online!**\n\nMain 60k+ files handle karne ke liye ready hu.\n\nCommands:\n- `/index_full`\n- `/index_target_full`\n- `/forward_full`\n- `/stop_all`")
+    # Duplicate check logic: Unique ID + (Name+Size)
+    target_ids = {item['file_unique_id'] for item in target_data}
+    target_names = {(item['file_name'], item['file_size']) for item in target_data}
 
-# Render dummy server
-async def run_bot():
-    await app.start()
-    print("Bot is running...")
-    await asyncio.Event().wait()
+    # Smart Web Series Sorting
+    if "webseries" in cmd or "full" in cmd:
+        source_data.sort(key=lambda x: (
+            x['series_info']['title'] if x['series_info'] else 'zzz',
+            x['series_info']['season'] if x['series_info'] else 0,
+            x['series_info']['episode'] if x['series_info'] else 0
+        ))
+
+    IS_BUSY = True
+    STOP_TASKS = False
+    sent = 0
+    status = await message.reply_text("📤 **Forwarding start ho gayi hai...**")
+
+    try:
+        for item in source_data:
+            if STOP_TASKS: break
+            
+            # Duplicate Skip
+            if item['file_unique_id'] in target_ids or (item['file_name'], item['file_size']) in target_names:
+                continue
+
+            try:
+                # copy_message use kar rahe hain taaki clean file jaye
+                await client.copy_message(
+                    chat_id=target_chat,
+                    from_chat_id=item['source_chat'],
+                    message_id=item['msg_id']
+                )
+                sent += 1
+                
+                # Safety Delays
+                if sent % 100 == 0:
+                    await status.edit(f"✅ **Sent:** {sent} files. Break le raha hu (25s)...")
+                    await asyncio.sleep(25)
+                elif sent % 10 == 0:
+                    await status.edit(f"📤 **Sent:** {sent} files...")
+                    await asyncio.sleep(2)
+
+            except FloodWait as e:
+                await status.edit(f"⏳ **FloodWait:** Waiting for {e.value}s...")
+                await asyncio.sleep(e.value + 5)
+            except RPCError:
+                continue
+
+        await status.edit(f"🏆 **Forwarding Complete!**\nTotal: {sent} files sent.")
+    finally:
+        IS_BUSY = False
+
+# ==============================
+# MAIN START (RENDER COMPATIBLE)
+# ==============================
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(run_bot())
+    # Start Health Check Server for Render
+    Thread(target=run_web_server, daemon=True).start()
+    
+    # Start Bot
+    print("MazaMovie UserBot is Starting...")
+    app.run()
