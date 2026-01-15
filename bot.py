@@ -408,78 +408,38 @@ async def index_channel_cmd(_, message):
             found_count = 0
             
             try:
-                # Stage 1: Videos
-                async for m in app.search_messages(src_id, filter=enums.MessagesFilter.VIDEO, limit=0):
+                # Stage 1: Full Channel History Scan
+                status = await message.reply(f"⏳ Full Channel Scan shuru ho raha hai... (Stage: get_chat_history)")
+                
+                async for m in app.get_chat_history(src_id):
                     if not GLOBAL_TASK_RUNNING:
                         await status.edit("🛑 Task stopped by user.")
                         break
                     
                     processed_stage1 += 1
-                    try:
-                        file_name, file_size, unique_id = get_media_details(m)
-                        if not unique_id: continue 
-                        
-                        text_to_check = (file_name or "") + " " + (m.caption or "")
-                        if SERIES_KEYWORDS_REGEX.search(text_to_check):
-                            continue
-                        
-                        if unique_id not in movie_index["movies"]:
-                            movie_index["movies"][unique_id] = { 
-                                "message_id": m.id,
-                                "file_name": file_name,
-                                "file_size": file_size
-                            }
-                            found_count += 1
-                    except Exception as e: print(f"[INDEX S1 ERR] Msg {m.id}: {e}")
                     
-                    if processed_stage1 % 500 == 0:
-                        try: await status.edit(f"⏳ Indexing Movies... (Stage 1)\nProcessed: {processed_stage1} videos\nFound: {found_count} unique")
+                    # Media check: Video ya Document (jo video type ho)
+                    if m.video or (m.document and "video" in (m.document.mime_type or "").lower()):
+                        try:
+                            file_name, file_size, unique_id = get_media_details(m)
+                            if not unique_id: continue 
+                            
+                            text_to_check = (file_name or "") + " " + (m.caption or "")
+                            if SERIES_KEYWORDS_REGEX.search(text_to_check):
+                                continue # Web series skip karein
+                            
+                            if unique_id not in movie_index["movies"]:
+                                movie_index["movies"][unique_id] = { 
+                                    "message_id": m.id,
+                                    "file_name": file_name,
+                                    "file_size": file_size
+                                }
+                                found_count += 1
+                        except Exception as e: print(f"[INDEX ERR] Msg {m.id}: {e}")
+                    
+                    if processed_stage1 % 1000 == 0:
+                        try: await status.edit(f"⏳ Deep Scanning Channel...\nProcessed: {processed_stage1} messages\nFound Movies: {found_count}")
                         except FloodWait: pass 
-                
-                if not GLOBAL_TASK_RUNNING: return
-
-                await status.edit(f"⏳ Indexing Movies... (Stage 2: Files)\nProcessed: {processed_stage1} videos\nFound: {found_count} unique")
-
-                # Stage 2: Documents (Files)
-                async for m in app.search_messages(src_id, filter=enums.MessagesFilter.DOCUMENT, limit=0):
-                    if not GLOBAL_TASK_RUNNING:
-                        await status.edit("🛑 Task stopped by user.")
-                        break
-
-                    processed_stage2 += 1
-                    try:
-                        # FIX: Removed strict video mime check to avoid skipping movie documents
-                        file_name, file_size, unique_id = get_media_details(m)
-                        if not unique_id: continue
-
-                        text_to_check = (file_name or "") + " " + (m.caption or "")
-                        if SERIES_KEYWORDS_REGEX.search(text_to_check):
-                            continue
-
-                        if unique_id not in movie_index["movies"]:
-                            movie_index["movies"][unique_id] = { 
-                                "message_id": m.id,
-                                "file_name": file_name,
-                                "file_size": file_size
-                            }
-                            found_count += 1
-                    except Exception as e: print(f"[INDEX S2 ERR] Msg {m.id}: {e}")
-
-                    if processed_stage2 % 500 == 0:
-                        try: await status.edit(f"⏳ Indexing Movies... (Stage 2)\nProcessed: {processed_stage2} files\nFound: {found_count} unique")
-                        except FloodWait: pass
-                
-                if not GLOBAL_TASK_RUNNING: return
-
-                save_movie_index_db()
-                await status.edit(f"🎉 Movie Indexing Complete!\nChannel: `{src_name}`\nFound: **{found_count}** unique movies.\n\nDatabase ko `movie_database.json` me save kar diya hai.")
-
-            except Exception as e:
-                if status: await status.edit(f"❌ Movie Indexing Error: `{e}`")
-        finally:
-            GLOBAL_TASK_RUNNING = False
-
-    app.loop.create_task(runner())
 
 # --- /index_target (Movies) ---
 @app.on_message(filters.command("index_target") & filters.create(only_admin))
