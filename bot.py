@@ -2628,33 +2628,45 @@ async def sync_chats(_, message):
 async def ping(_, message):
     await message.reply("✅ Alive | Polling | Ready")
 
-# --- Auto-Restart Loop ---
-print("Loading databases (Full Forward Mode)...")
-load_movie_duplicate_dbs()
-load_webseries_duplicate_dbs()
-load_full_duplicate_dbs() # NAYA
-load_movie_index_db()
-load_locked_content()
-print(f"Loaded {len(movie_fwd_unique_ids)} movie unique IDs.")
-print(f"Loaded {len(webseries_fwd_unique_ids)} webseries unique IDs.")
-print(f"Loaded {len(full_fwd_unique_ids)} full forward unique IDs.")
-print(f"Loaded {len(movie_index.get('movies', {}))} indexed movies from {movie_index}")
-print("✅ UserBot ready — send commands.")
+# --- Main Execution ---
+async def main():
+    # Load Databases
+    print("📂 Loading databases...")
+    load_movie_duplicate_dbs()
+    load_webseries_duplicate_dbs()
+    load_full_duplicate_dbs()
+    load_movie_index_db()
+    load_locked_content()
+    
+    print(f"✅ Loaded Stats:\n- Movies: {len(movie_fwd_unique_ids)}\n- Series: {len(webseries_fwd_unique_ids)}\n- Full: {len(full_fwd_unique_ids)}")
 
-while True:
+    print("🚀 Starting Dual Clients (Boss & Worker)...")
+    
+    # Start both clients
+    await bot.start()
+    await worker.start()
+    
+    print("✅ BOSS is Online!")
+    print("✅ WORKER is Online!")
+    
+    # Send Startup msg to Admin
     try:
-        print("Bot ko start kar raha hoon...")
-        app.run()
-        print("Bot ruk गया है. 10 second me restart kar raha hoon...")
-    
-    except RPCError as rpc_e:
-        print(f"❌ [CRITICAL RPCError] Pyrogram client crash hua: {rpc_e}")
-        print("Restarting in 60 seconds...")
-        time.sleep(60)
-        
+        await bot.send_message(ADMIN_ID, "🚀 **Dual Engine Bot Started!**\n/start dabakar menu dekhein.")
     except Exception as e:
-        print(f"❌ [CRITICAL ERROR] Bot loop crash hua: {e}")
-        print("Restarting in 10 seconds...")
+        print(f"⚠️ Admin ko msg nahi bhej paaya: {e}")
+
+    # Keep the bot running
+    await idle()
     
-    print("Restarting loop...")
-    time.sleep(10)
+    # Stop cleanly
+    await bot.stop()
+    await worker.stop()
+
+if __name__ == "__main__":
+    try:
+        # Pyrogram ka internal loop use karne ki jagah asyncio.run best hai
+        bot.loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        print("\n🛑 Bot stopped manually.")
+    except Exception as e:
+        print(f"❌ Fatal Error: {e}")
