@@ -930,16 +930,24 @@ async def index_full_cmd(_, message):
             indexed_ids = set() # Avoid duplicates within index
             
             try:
-                # Stage 1: Videos
-                async for m in app.search_messages(src_id, filter=enums.MessagesFilter.VIDEO, limit=0):
+                # --- NEW ROBUST INDEXING (VIDEO + DOCUMENT MIX) ---
+                # get_chat_history sabse reliable hai, yeh line by line sab read karega
+                async for m in app.get_chat_history(src_id):
                     if not GLOBAL_TASK_RUNNING:
                         await status.edit("🛑 Task stopped by user.")
                         break
                     
-                    processed_stage1 += 1
+                    # Sirf Video aur Document check karo
+                    if not (m.video or m.document):
+                        continue
+
+                    processed_stage1 += 1 # Counter variable (rename mat karna agar upar define hai)
                     try:
                         file_name, file_size, unique_id = get_media_details(m)
-                        if not unique_id or unique_id in indexed_ids: continue 
+                        
+                        # Check: Agar unique_id nahi hai ya already index ho chuka hai
+                        if not unique_id or unique_id in indexed_ids: 
+                            continue 
                         
                         temp_media_list.append({
                             "message_id": m.id,
@@ -950,16 +958,12 @@ async def index_full_cmd(_, message):
                         })
                         indexed_ids.add(unique_id)
                         found_count += 1
-                    except Exception as e: print(f"[INDEX_FULL S1 ERR] Msg {m.id}: {e}")
+                    except Exception as e: 
+                        print(f"[INDEX_FULL ERR] Msg {m.id}: {e}")
                     
                     if processed_stage1 % 500 == 0:
-                        try: await status.edit(f"⏳ Indexing All Media... (Stage 1)\nProcessed: {processed_stage1} videos\nFound: {found_count} media")
+                        try: await status.edit(f"⏳ Indexing All Media (Deep Scan)...\nScanned Msgs: {processed_stage1}\nFound Media: {found_count}")
                         except FloodWait: pass 
-                
-                if not GLOBAL_TASK_RUNNING: return
-
-                await status.edit(f"⏳ Indexing All Media... (Stage 2: Files)\nProcessed: {processed_stage1} videos\nFound: {found_count} media")
-
                 # Stage 2: Documents (Files)
                 async for m in app.search_messages(src_id, filter=enums.MessagesFilter.DOCUMENT, limit=0):
                     if not GLOBAL_TASK_RUNNING:
