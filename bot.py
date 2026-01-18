@@ -1116,135 +1116,6 @@ async def index_target_full_cmd(_, message):
 
     app.loop.create_task(runner())
     
-# --- NAYA: /forward_full ---
-@app.on_message(filters.command("forward_full") & filters.create(only_admin))
-async def forward_full_cmd(_, message):
-    global GLOBAL_TASK_RUNNING
-    if GLOBAL_TASK_RUNNING:
-        await message.reply("❌ Bot pehle se hi ek task chala raha hai. Pehle `/stop_all` use karein ya wait karein.")
-        return
-    
-    try:
-        initial_reply = await message.reply("✅ Command received. Processing...")
-    except Exception as e:
-        print(f"Error sending initial reply: {e}")
-        return
-
-    if not os.path.exists(FULL_SOURCE_INDEX_DB_FILE):
-        await initial_reply.edit_text(f"❌ `{FULL_SOURCE_INDEX_DB_FILE}` file nahi mili. Pehle `/index_full <chat_id>` chalao.")
-        return
-
-    args = message.text.split(" ", 2)
-    if len(args) < 2:
-        await initial_reply.edit_text("❌ Usage:\n`/forward_full <target_chat_id> [limit]`")
-        return
-
-    target_ref = args[1].strip()
-    fwd_limit = None
-    if len(args) == 3:
-        try:
-            fwd_limit = int(args[2].strip())
-        except ValueError:
-            await initial_reply.edit_text("❌ Limit number hona chahiye.")
-            return
-            
-    GLOBAL_TASK_RUNNING = True
-    async def runner():
-        global forwarded_count, GLOBAL_TASK_RUNNING
-        status = initial_reply
-        try:
-            try:
-                tgt_chat = await resolve_chat_id(app, target_ref)
-                tgt = tgt_chat.id
-                tgt_name = tgt_chat.title or tgt_chat.username
-            except Exception as e:
-                await status.edit_text(str(e)) 
-                return
-
-            try:
-                with open(FULL_SOURCE_INDEX_DB_FILE, "r", encoding="utf-8") as f:
-                    full_media_list = json.load(f)
-            except Exception as e:
-                await status.edit_text(f"❌ Error loading `{FULL_SOURCE_INDEX_DB_FILE}`: {e}")
-                return
-                
-            load_full_duplicate_dbs() # Full forward ke duplicate sets load karo
-
-            forwarded_count = 0
-            duplicate_count = 0
-            processed_count = 0
-            
-            total_in_index = len(full_media_list)
-            total_to_forward_num = fwd_limit or total_in_index
-            total_to_forward_str = fwd_limit or "all"
-
-            await status.edit_text(
-                f"⏳ **Full Media Forwarding** shuru ho raha hai...\n"
-                f"Target: `{tgt_name}`\n"
-                f"Total Media in Index: `{total_in_index}`\n"
-                f"Limit: `{total_to_forward_str}`\n"
-                f"Total Duplicates (Loaded): `{len(full_fwd_unique_ids)}` (IDs) + `{len(full_target_compound_keys)}` (Name+Size)",
-                reply_markup=STOP_BUTTON
-            )
-            
-                        # --- DUAL CLIENT QUEUE SYSTEM ---
-            queue = asyncio.Queue()
-            
-            # 1. Queue bharna (Duplicates filter karke)
-            skipped_dupes = 0
-            queued_items = []
-            
-            for item in full_media_list:
-                # Limit check
-                if fwd_limit and len(queued_items) >= fwd_limit:
-                    break
-                    
-                unique_id = item.get("file_unique_id")
-                file_name = item.get("file_name")
-                file_size = item.get("file_size")
-                compound_key = f"{file_name}-{file_size}" if file_name and file_size else None
-                
-                # Check Duplicates BEFORE putting in queue
-                if (unique_id and unique_id in full_fwd_unique_ids) or \
-                   (compound_key and compound_key in full_target_compound_keys):
-                    duplicate_count += 1
-                    continue
-                
-                queue.put_nowait(item)
-                queued_items.append(item) # Just for counting
-            
-            total_to_process = queue.qsize()
-            await status.edit_text(f"✅ Queue Ready!\nItems to Forward: {total_to_process}\nDuplicates Removed: {duplicate_count}\n\n🚀 Starting Dual Engine (Boss + Worker)...", reply_markup=STOP_BUTTON)
-            
-            # 2. Worker Function (Jo dono clients use karenge)
-            async def worker_engine(client_obj, worker_name):
-                nonlocal forwarded_count, GLOBAL_TASK_RUNNING
-                
-                while GLOBAL_TASK_RUNNING and not queue.empty():
-                    try:
-                        item = queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        break
-                        
-                    msg_id = item["message_id"]
-                    src_id = item["chat_id"]
-                    unique_id = item.get("file_unique_id")
-                    file_name = item.get("file_name")
-                    file_size = item.get("file_size")
-                    compound_key = f"{file_name}-{file_size}" if file_name and file_size else None
-                    
-                    try:
-                        if mode_copy:
-                            await client_obj.copy_message(tgt, src_id, msg_id)
-                        else:
-                            await client_obj.forward_messages(tgt, src_id, msg_id)
-                            
-                        # Success: Database update karo
-                        save_forwarded_id(unique_id, compound_key, db_type="full")
-                        forwarded_count += 1
-                        
-                        # Speed control (Double engine hai, thoda delay rakho safe rehne ke liye)
-                        await asyncio.sleep(PER_MSG_DELAY) 
        # --- NAYA: /forward_full ---
 @app.on_message(filters.command("forward_full") & filters.create(only_admin))
 async def forward_full_cmd(_, message):
@@ -1364,7 +1235,125 @@ async def forward_full_cmd(_, message):
                         
                     except FloodWait as e:
                         print(f"[{worker_name}] FloodWait: {e.value}s")
+   # --- NAYA: /forward_full ---
+@app.on_message(filters.command("forward_full") & filters.create(only_admin))
+async def forward_full_cmd(_, message):
+    global GLOBAL_TASK_RUNNING
+    if GLOBAL_TASK_RUNNING:
+        await message.reply("❌ Bot pehle se hi ek task chala raha hai. Pehle `/stop_all` use karein ya wait karein.")
+        return
+    
+    try:
+        initial_reply = await message.reply("✅ Command received. Processing...")
+    except Exception as e:
+        print(f"Error sending initial reply: {e}")
+        return
+
+    if not os.path.exists(FULL_SOURCE_INDEX_DB_FILE):
+        await initial_reply.edit_text(f"❌ `{FULL_SOURCE_INDEX_DB_FILE}` file nahi mili. Pehle `/index_full <chat_id>` chalao.")
+        return
+
+    args = message.text.split(" ", 2)
+    if len(args) < 2:
+        await initial_reply.edit_text("❌ Usage:\n`/forward_full <target_chat_id> [limit]`")
+        return
+
+    target_ref = args[1].strip()
+    fwd_limit = None
+    if len(args) == 3:
+        try:
+            fwd_limit = int(args[2].strip())
+        except ValueError:
+            await initial_reply.edit_text("❌ Limit number hona chahiye.")
+            return
+            
+    GLOBAL_TASK_RUNNING = True
+    async def runner():
+        global forwarded_count, GLOBAL_TASK_RUNNING
+        status = initial_reply
+        try:
+            try:
+                tgt_chat = await resolve_chat_id(app, target_ref)
+                tgt = tgt_chat.id
+                tgt_name = tgt_chat.title or tgt_chat.username
+            except Exception as e:
+                await status.edit_text(str(e)) 
+                return
+
+            try:
+                with open(FULL_SOURCE_INDEX_DB_FILE, "r", encoding="utf-8") as f:
+                    full_media_list = json.load(f)
+            except Exception as e:
+                await status.edit_text(f"❌ Error loading `{FULL_SOURCE_INDEX_DB_FILE}`: {e}")
+                return
+                
+            load_full_duplicate_dbs() # Full forward ke duplicate sets load karo
+
+            forwarded_count = 0
+            duplicate_count = 0
+            
+            # --- DUAL CLIENT QUEUE SYSTEM ---
+            queue = asyncio.Queue()
+            
+            # 1. Queue bharna (Duplicates filter karke)
+            queued_items = []
+            
+            for item in full_media_list:
+                # Limit check
+                if fwd_limit and len(queued_items) >= fwd_limit:
+                    break
+                    
+                unique_id = item.get("file_unique_id")
+                file_name = item.get("file_name")
+                file_size = item.get("file_size")
+                compound_key = f"{file_name}-{file_size}" if file_name and file_size else None
+                
+                # Check Duplicates BEFORE putting in queue
+                if (unique_id and unique_id in full_fwd_unique_ids) or \
+                   (compound_key and compound_key in full_target_compound_keys):
+                    duplicate_count += 1
+                    continue
+                
+                queue.put_nowait(item)
+                queued_items.append(item) # Just for counting
+            
+            total_to_process = queue.qsize()
+            await status.edit_text(f"✅ Queue Ready!\nItems to Forward: {total_to_process}\nDuplicates Removed: {duplicate_count}\n\n🚀 Starting Dual Engine (Boss + Worker)...", reply_markup=STOP_BUTTON)
+            
+            # 2. Worker Function (Jo dono clients use karenge)
+            async def worker_engine(client_obj, worker_name):
+                nonlocal forwarded_count, GLOBAL_TASK_RUNNING
+                
+                while GLOBAL_TASK_RUNNING and not queue.empty():
+                    try:
+                        item = queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                        
+                    msg_id = item["message_id"]
+                    src_id = item["chat_id"]
+                    unique_id = item.get("file_unique_id")
+                    file_name = item.get("file_name")
+                    file_size = item.get("file_size")
+                    compound_key = f"{file_name}-{file_size}" if file_name and file_size else None
+                    
+                    try:
+                        if mode_copy:
+                            await client_obj.copy_message(tgt, src_id, msg_id)
+                        else:
+                            await client_obj.forward_messages(tgt, src_id, msg_id)
+                            
+                        # Success: Database update karo
+                        save_forwarded_id(unique_id, compound_key, db_type="full")
+                        forwarded_count += 1
+                        
+                        # Speed control
+                        await asyncio.sleep(PER_MSG_DELAY) 
+                        
+                    except FloodWait as e:
+                        print(f"[{worker_name}] FloodWait: {e.value}s")
                         await asyncio.sleep(e.value)
+                        # FloodWait ke case mein item wapas queue mein nahi daal rahe taaki loop na phase
                     except Exception as e:
                         print(f"[{worker_name}] Error: {e}")
                     finally:
@@ -1387,7 +1376,11 @@ async def forward_full_cmd(_, message):
             
             await asyncio.gather(task1, task2)
             
-            await status.edit_text(f"✅ **Dual Engine Task Complete!**\nTotal Forwarded: {forwarded_count}")
+            final_msg = f"🎉 **Dual Engine Task Complete!**\nTotal Forwarded: {forwarded_count}"
+            if not GLOBAL_TASK_RUNNING:
+                final_msg = f"🛑 **Task Stopped!**\nTotal Forwarded: {forwarded_count}"
+            
+            await status.edit_text(final_msg, reply_markup=None)
 
         except Exception as e:
             await status.edit_text(f"❌ Error in runner: {e}")
