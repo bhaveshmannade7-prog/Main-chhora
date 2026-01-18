@@ -27,8 +27,7 @@ worker = Client("worker", api_id=API_ID, api_hash=API_HASH, session_string=SESSI
 # compatibility ke liye 'bot' se map kar rahe hain.
 app = bot 
 
-# Session via string (Pyrogram v2)
-app = Client("user", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
+# Note: Purana 'app = Client(...)' yahan se hata diya gaya hai taaki conflict na ho.
 
 # --- Runtime state ---
 target_channel = None
