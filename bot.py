@@ -1,7 +1,7 @@
-import os, re, json, asyncio, time
-from threading import Thread, Event
+import os, re, json, asyncio, time, math
+from threading import Thread
 from flask import Flask
-from pyrogram import Client, filters, enums
+from pyrogram import Client, filters, enums, compose, idle
 from pyrogram.errors import (
     FloodWait, ChatAdminRequired, InviteHashExpired, InviteHashInvalid, 
     PeerIdInvalid, UserAlreadyParticipant, MessageIdInvalid, MessageAuthorRequired, 
@@ -14,15 +14,17 @@ API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
-# Multi-Session Setup
-SESSION1 = os.getenv("SESSION_STRING")       # Main Admin / Indexer
-SESSION2 = os.getenv("SESSION_STRING_2")     # Worker 1
-SESSION3 = os.getenv("SESSION_STRING_3")     # Worker 2
+# EXTENSION: Multi-Session Support (3 Sessions)
+# Backward compatibility: Use SESSION_STRING if SESSION1 is missing
+SESSION1 = os.getenv("SESSION1", os.getenv("SESSION_STRING"))
+SESSION2 = os.getenv("SESSION2")
+SESSION3 = os.getenv("SESSION3")
 
-# Deployment Mode Detection
-IS_RENDER = os.getenv("RENDER", "False").lower() in ("true", "1", "yes")
+if not SESSION1:
+    print("❌ Error: SESSION1 or SESSION_STRING is missing!")
+    exit(1)
 
-# --- WEB SERVER (RENDER ONLY) ---
+# --- WEB SERVER FOR RENDER (DEPLOYMENT MODES) ---
 app_web = Flask(__name__)
 
 @app_web.route('/')
@@ -34,39 +36,56 @@ def run_web_server():
     app_web.run(host="0.0.0.0", port=port)
 
 def start_web_server():
-    if IS_RENDER:
-        t = Thread(target=run_web_server, daemon=True)
+    # EXTENSION: Auto-detect Deployment Mode
+    # If PORT or RENDER env exists, assume Server mode. Else Termux/Mobile.
+    if os.getenv("PORT") or os.getenv("RENDER"):
+        print("🌍 Server Deployment Detected: Starting Web Server...")
+        t = Thread(target=run_web_server)
         t.start()
-        print("🌍 Web Server Started (Render Mode)")
     else:
-        print("📱 Phone/Termux Mode: Web Server Disabled to save battery/ports.")
+        print("📱 Mobile/Termux Mode Detected: Web Server Disabled to save resources.")
 
-# --- ADVANCED CLIENT SETUP (MULTI-CLIENT) ---
-# Common args for all clients
-client_args = {
-    "api_id": API_ID,
-    "api_hash": API_HASH,
-    "in_memory": True,
-    "ipv6": False,
-    "no_updates": True  # Workers don't need incoming updates, saves bandwidth
-}
+# --- ADVANCED CLIENT SETUP (MULTI-SESSION) ---
+# Primary Client (Session 1) - Handles Commands & Main Logic
+app = Client(
+    "advanced_user_bot_1", 
+    api_id=API_ID, 
+    api_hash=API_HASH, 
+    session_string=SESSION1, 
+    in_memory=True,
+    ipv6=False
+)
 
-# Main Client (Handles Commands & Indexing)
-app1 = Client("worker_1", session_string=SESSION1, **{**client_args, "no_updates": False})
+# Secondary Client (Session 2) - Worker Only
+app2 = Client(
+    "advanced_user_bot_2", 
+    api_id=API_ID, 
+    api_hash=API_HASH, 
+    session_string=SESSION2 if SESSION2 else SESSION1, # Fallback to prevent crash if not set, but logic requires unique
+    in_memory=True,
+    ipv6=False
+)
 
-# Secondary Clients (Pure Forwarders)
-# If sessions aren't provided, they default to None and won't be used (Graceful fallback)
-app2 = Client("worker_2", session_string=SESSION2, **client_args) if SESSION2 else None
-app3 = Client("worker_3", session_string=SESSION3, **client_args) if SESSION3 else None
+# Tertiary Client (Session 3) - Worker Only
+app3 = Client(
+    "advanced_user_bot_3", 
+    api_id=API_ID, 
+    api_hash=API_HASH, 
+    session_string=SESSION3 if SESSION3 else SESSION1, # Fallback
+    in_memory=True,
+    ipv6=False
+)
 
-# List of active clients for forwarding
-WORKER_CLIENTS = [c for c in [app1, app2, app3] if c is not None]
+# List of all clients for concurrent management
+ALL_CLIENTS = [app]
+if SESSION2: ALL_CLIENTS.append(app2)
+if SESSION3: ALL_CLIENTS.append(app3)
 
 # --- GLOBAL SETTINGS (OPTIMIZED) ---
 GLOBAL_TASK_RUNNING = False
-PER_MSG_DELAY = 0.2        # Base delay
-BATCH_SIZE = 250           
-BREAK_TIME = 30            
+PER_MSG_DELAY = 0.2        # Speed fast kar di gayi hai (Safe limit)
+BATCH_SIZE = 250           # 250 Messages ka batch
+BREAK_TIME = 30            # 250 ke baad 30 second ka break (Account Safety)
 
 # --- DATABASE FILES ---
 DB_FILES = {
@@ -77,29 +96,15 @@ DB_FILES = {
     "history": "history_ids.txt"
 }
 
-# --- MEMORY CACHE ---
+# --- MEMORY CACHE (High Speed Lookup) ---
 target_cache = {
     "unique_ids": set(),
     "name_size": set()
 }
 
-# --- SHARED PROGRESS TRACKER ---
-class ProgressTracker:
-    def __init__(self):
-        self.total = 0
-        self.success = 0
-        self.skipped = 0
-        self.failed = 0
-        self.lock = asyncio.Lock()
-
-    async def update(self, status="success"):
-        async with self.lock:
-            if status == "success": self.success += 1
-            elif status == "skipped": self.skipped += 1
-            elif status == "failed": self.failed += 1
-
 # --- REGEX PATTERNS ---
 BAD_QUALITY_REGEX = re.compile(r"\b(cam|camrip|hdcam|ts|telesync|tc|pre-dvdrip|scr|screener|bad audio)\b", re.IGNORECASE)
+SERIES_REGEX = re.compile(r"S\d{1,2}|Season|\bEp\b|Episode", re.IGNORECASE)
 
 # --- HELPER FUNCTIONS ---
 
@@ -107,6 +112,10 @@ def only_admin(_, __, m):
     return m.from_user and m.from_user.id == ADMIN_ID
 
 def get_media_details(m):
+    """
+    Highly Optimized Media Extractor.
+    Sirf Video aur Document (Video files) ko accept karega.
+    """
     media = m.video or m.document
     if not media:
         return None, 0, None
@@ -121,6 +130,10 @@ def get_media_details(m):
     return getattr(media, 'file_name', "Unknown"), getattr(media, 'file_size', 0), getattr(media, 'file_unique_id', None)
 
 async def resolve_chat_id(client, ref):
+    """
+    Advanced Chat Resolver.
+    Handles: IDs, Usernames, Invite Links.
+    """
     ref_str = str(ref).strip()
     try:
         if ref_str.lstrip('-').isdigit():
@@ -138,9 +151,12 @@ async def resolve_chat_id(client, ref):
     try:
         return await client.get_chat(ref_str)
     except Exception as e:
-        raise ValueError(f"❌ Chat resolve fail: {e}")
+        raise ValueError(f"❌ Chat resolve nahi hua. ID/Username check karein.\nError: {e}")
 
 def load_target_cache(db_file):
+    """
+    Double Layer Caching for 100% Duplicate Protection.
+    """
     global target_cache
     target_cache["unique_ids"].clear()
     target_cache["name_size"].clear()
@@ -160,324 +176,356 @@ def load_target_cache(db_file):
         except Exception as e:
             print(f"Cache Load Warning: {e}")
 
-    print(f"✅ Cache Loaded: {len(target_cache['unique_ids'])} UIDs")
+    print(f"✅ Cache Loaded: {len(target_cache['unique_ids'])} Unique IDs | {len(target_cache['name_size'])} Name-Size Keys")
 
 def save_history(unique_id, name, size):
+    """Updates memory and file instantly."""
     if unique_id:
         target_cache["unique_ids"].add(unique_id)
         with open(DB_FILES["history"], "a") as f:
             f.write(f"{unique_id}\n")
+            
     if name and size:
         target_cache["name_size"].add(f"{name}-{size}")
 
-def split_list(data, n):
-    """Splits a list into n chunks deterministically."""
-    k, m = divmod(len(data), n)
-    return [data[i*k+min(i, m):(i+1)*k+min(i+1, m)] for i in range(n)]
-
-# --- WORKER ENGINE ---
-
-async def worker_forwarding_task(client_obj, data_chunk, target_chat_id, progress, mode_copy):
-    """
-    Isolated worker process for a single client.
-    Handles its own delays and FloodWait without affecting others.
-    """
-    batch_counter = 0
-    
-    # Resolve target chat specifically for this client (needed for access hash)
-    try:
-        dest_chat = await client_obj.get_chat(target_chat_id)
-    except Exception:
-        # If get_chat fails, try to join if it's not private
-        # For simplicity in workers, we assume app1 resolved access or its a public chat/id
-        dest_chat = await client_obj.get_chat(target_chat_id)
-
-    for item in data_chunk:
-        if not GLOBAL_TASK_RUNNING:
-            break
-            
-        try:
-            if mode_copy:
-                await client_obj.copy_message(dest_chat.id, item['chat_id'], item['msg_id'])
-            else:
-                await client_obj.forward_messages(dest_chat.id, item['chat_id'], item['msg_id'])
-            
-            # Save History & Update Progress
-            save_history(item.get("unique_id"), item.get("name"), item.get("size"))
-            await progress.update("success")
-            
-            batch_counter += 1
-            
-            # --- SAFETY BREAK LOGIC ---
-            if batch_counter >= BATCH_SIZE:
-                # Local break for this worker only
-                await asyncio.sleep(BREAK_TIME)
-                batch_counter = 0
-            else:
-                await asyncio.sleep(PER_MSG_DELAY)
-
-        except FloodWait as e:
-            # Silent Wait - Do not update status, just wait
-            # Other workers will continue running!
-            await asyncio.sleep(e.value + 5)
-        except (MessageIdInvalid, MessageAuthorRequired):
-            await progress.update("failed")
-        except Exception as e:
-            print(f"Worker Error: {e}")
-            await progress.update("failed")
-
-# --- MAIN ENGINES ---
+# --- ENGINES ---
 
 async def indexing_engine(client, message, chat_ref, db_file, mode="all"):
     """
-    Standard Indexing Engine (Runs on Main Client app1)
+    🚀 High-Speed Indexing Engine (Generates ONE BIG JSON)
+    This runs on the primary session (app) usually.
     """
     global GLOBAL_TASK_RUNNING
     GLOBAL_TASK_RUNNING = True
     
-    status = await message.reply(f"🚀 **Indexing Started**\nTarget: `{chat_ref}`\nMode: `{mode}`")
+    status = await message.reply(f"🚀 **High-Speed Indexing Started**\n\nTarget: `{chat_ref}`\nMode: `{mode.upper()}`\n\n_Scanning..._")
     
     try:
         chat = await resolve_chat_id(client, chat_ref)
         data_list = []
         unique_ids_set = set()
         name_size_set = set()
+        
         count = 0
-        found = 0
+        found_movies = 0
         
         async for m in client.get_chat_history(chat.id):
             if not GLOBAL_TASK_RUNNING:
-                await status.edit("🛑 Stopped.")
+                await status.edit("🛑 Task Stopped by User.")
                 return
 
-            if not (m.video or m.document): continue
+            if not (m.video or m.document):
+                continue
             
-            fname, fsize, uid = get_media_details(m)
-            if not uid: continue
+            file_name, file_size, unique_id = get_media_details(m)
+            if not unique_id: continue
 
             if "target" in db_file:
-                unique_ids_set.add(uid)
-                if fname and fsize: name_size_set.add(f"{fname}-{fsize}")
+                unique_ids_set.add(unique_id)
+                if file_name and file_size:
+                    name_size_set.add(f"{file_name}-{file_size}")
             else:
                 data_list.append({
-                    "msg_id": m.id, "chat_id": chat.id,
-                    "unique_id": uid, "name": fname, "size": fsize
+                    "msg_id": m.id,
+                    "chat_id": chat.id,
+                    "unique_id": unique_id,
+                    "name": file_name,
+                    "size": file_size
                 })
             
-            found += 1
+            found_movies += 1
             count += 1
             
             if count % 500 == 0:
-                try: await status.edit(f"⚡ **Scanning**\nChecked: {count}\nFound: {found}")
-                except: pass
+                try:
+                    await status.edit(f"⚡ **Scanning `{chat.title}`**\n\nChecked: {count}\nMovies Found: {found_movies}")
+                except FloodWait: pass
 
         if "target" in db_file:
-            final_data = {"unique_ids": list(unique_ids_set), "compound_keys": list(name_size_set)}
-            with open(db_file, "w") as f: json.dump(final_data, f)
-            msg = f"✅ **Target Indexed**\nUIDs: `{len(unique_ids_set)}`"
+            final_data = {
+                "unique_ids": list(unique_ids_set),
+                "compound_keys": list(name_size_set)
+            }
+            with open(db_file, "w") as f:
+                json.dump(final_data, f)
+            msg = f"✅ **Target Indexing Complete!**\n\nChannel: `{chat.title}`\nUnique Files: `{len(unique_ids_set)}`\n\nDuplicate protection database update ho gaya hai."
         else:
             data_list.reverse()
-            with open(db_file, "w") as f: json.dump(data_list, f, indent=2)
-            msg = f"✅ **Source Indexed**\nFiles: `{len(data_list)}`"
+            with open(db_file, "w") as f:
+                json.dump(data_list, f, indent=2)
+            msg = f"✅ **Source Indexing Complete!**\n\nChannel: `{chat.title}`\nMovies Found: `{len(data_list)}`\n\nSaved to `{db_file}`."
 
         await status.edit(msg)
 
     except Exception as e:
-        await status.edit(f"❌ Error: {e}")
+        await status.edit(f"❌ Error during Indexing: {e}")
     finally:
         GLOBAL_TASK_RUNNING = False
 
-async def multi_session_forwarding_manager(message, source_db, target_db, destination_ref, limit=None, mode_copy=True):
+async def forwarding_engine(message, source_db, target_db, destination_ref, limit=None, mode_copy=True):
     """
-    🚀 Multi-Session Manager
-    - Splits data into 3 chunks.
-    - Assigns chunks to app1, app2, app3.
-    - Monitors progress centrally.
+    🚀 EXTENDED Smart Forwarding Engine
+    - Multi-Session Partitioning (Splits JSON into 3 parts)
+    - Concurrent Execution (Session 1, 2, 3 run in parallel)
+    - FloodWait Isolation (One waiting doesn't stop others)
     """
     global GLOBAL_TASK_RUNNING
     GLOBAL_TASK_RUNNING = True
     
-    status = await message.reply("⚙️ **Initializing Multi-Session Engine...**")
+    status = await message.reply("⚙️ **Preparing Engine (Multi-Session)**\nLoading Databases...")
     
-    # 1. Load Data
-    if not os.path.exists(source_db): return await status.edit("❌ Source missing.")
+    # 1. Validation
+    if not os.path.exists(source_db):
+        return await status.edit("❌ Source Index nahi mila! Pehle `/index` command chalao.")
+    
+    # 2. Load Source
     try:
-        with open(source_db, "r") as f: source_data = json.load(f)
-    except: return await status.edit("❌ DB Corrupt.")
+        with open(source_db, "r") as f:
+            source_data = json.load(f)
+    except Exception as e:
+        return await status.edit(f"❌ Database Error: {e}")
 
+    # 3. Load Target
     load_target_cache(target_db)
     
-    # 2. Resolve Destination (Main Client)
+    # 4. Resolve Destination (Must be resolved by all clients, but we resolve once here for ID)
     try:
-        dest_chat = await resolve_chat_id(app1, destination_ref)
+        # Resolve using Session 1 (app)
+        dest_chat = await resolve_chat_id(app, destination_ref)
+        dest_id = dest_chat.id
     except Exception as e:
-        return await status.edit(f"❌ Dest Error: {e}")
+        return await status.edit(f"❌ Destination Error: {e}")
 
-    # 3. Filter Duplicates
-    await status.edit("🔍 **Filtering Duplicates...**")
-    clean_list = []
-    skipped_init = 0
+    # 5. Smart Filtering (Duplicates Hatana)
+    await status.edit("🔍 **Checking Duplicates...**")
+    final_list = []
+    skipped_count = 0
     
     for item in source_data:
-        key = f"{item.get('name')}-{item.get('size')}"
-        if (item.get('unique_id') in target_cache["unique_ids"]) or (key in target_cache["name_size"]):
-            skipped_init += 1
+        u_id = item.get("unique_id")
+        name = item.get("name")
+        size = item.get("size")
+        
+        key = f"{name}-{size}"
+        
+        if (u_id in target_cache["unique_ids"]) or (key in target_cache["name_size"]):
+            skipped_count += 1
             continue
-        clean_list.append(item)
+        
+        final_list.append(item)
     
     if limit and int(limit) > 0:
-        clean_list = clean_list[:int(limit)]
-        
-    if not clean_list:
-        return await status.edit(f"✅ Nothing to forward.\nSkipped: {skipped_init}")
-
-    # 4. Split Data for Workers
-    active_workers = WORKER_CLIENTS 
-    num_workers = len(active_workers)
+        final_list = final_list[:int(limit)]
     
-    if num_workers == 0:
-        return await status.edit("❌ No clients initialized!")
+    if not final_list:
+        return await status.edit(f"✅ **Nothing to Forward!**\n\nSabhi files target channel me pehle se maujood hain.\nSkipped Duplicates: `{skipped_count}`")
 
-    chunks = split_list(clean_list, num_workers)
-    progress_tracker = ProgressTracker()
-    progress_tracker.total = len(clean_list)
-    progress_tracker.skipped = skipped_init
+    # 6. PARTITIONING LOGIC (Split into 3 Chunks)
+    total_items = len(final_list)
+    active_sessions = [c for c in ALL_CLIENTS if c.is_connected]
+    num_sessions = len(active_sessions)
+    
+    # Basic math to split list
+    chunk_size = math.ceil(total_items / num_sessions)
+    chunks = [final_list[i:i + chunk_size] for i in range(0, total_items, chunk_size)]
+    
+    # Ensure we have enough chunks (empty list if session unused)
+    while len(chunks) < len(active_sessions):
+        chunks.append([])
 
     await status.edit(
-        f"🚀 **Starting Multi-Session Forwarding**\n\n"
-        f"👥 Active Accounts: `{num_workers}`\n"
-        f"📂 Total Files: `{len(clean_list)}`\n"
-        f"✂️ Split Strategy: `{len(clean_list)} / {num_workers}` per account\n"
-        f"🛡️ Duplicate Check: Active"
+        f"🚀 **Multi-Session Forwarding Started!**\n\n"
+        f"Source Files: `{len(source_data)}`\n"
+        f"Filtered for Fwd: `{total_items}`\n"
+        f"Active Sessions: `{num_sessions}`\n"
+        f"Target: `{dest_chat.title}`\n\n"
+        f"⚠️ _Status updates might be slower due to parallel tasks._"
     )
 
-    # 5. Launch Workers
-    tasks = []
-    for i, client_obj in enumerate(active_workers):
-        if chunks[i]: # Only start if chunk has data
-            task = asyncio.create_task(
-                worker_forwarding_task(client_obj, chunks[i], dest_chat.id, progress_tracker, mode_copy)
-            )
-            tasks.append(task)
-
-    # 6. Monitor Loop (Only main thread updates Status)
-    while any(not t.done() for t in tasks):
-        if not GLOBAL_TASK_RUNNING:
-            for t in tasks: t.cancel()
-            break
-            
-        await asyncio.sleep(8) # Update status every 8s to avoid rate limits
+    # SHARED COUNTERS
+    progress_stats = {"success": 0, "total": total_items}
+    
+    # WORKER FUNCTION (Isolated FloodWait)
+    async def session_worker(client, worker_data, session_name):
+        local_success = 0
+        batch_counter = 0
         
-        try:
-            percent = (progress_tracker.success / progress_tracker.total) * 100 if progress_tracker.total > 0 else 0
-            await status.edit(
-                f"🔄 **Multi-Forwarding...**\n\n"
-                f"✅ Success: `{progress_tracker.success}`\n"
-                f"⚠️ Failed: `{progress_tracker.failed}`\n"
-                f"📊 Progress: `{percent:.1f}%`\n\n"
-                f"_Running on {num_workers} sessions..._"
-            )
-        except FloodWait: 
-            pass # Don't crash monitor on status update floodwait
-        except Exception: 
-            pass
+        # Resolve destination for THIS specific client (cache check)
+        # Note: We rely on dest_id which is numeric, so safe for all sessions
+        
+        for item in worker_data:
+            if not GLOBAL_TASK_RUNNING:
+                break
+            
+            try:
+                if mode_copy:
+                    await client.copy_message(dest_id, item['chat_id'], item['msg_id'])
+                else:
+                    await client.forward_messages(dest_id, item['chat_id'], item['msg_id'])
+                
+                # Instant Save (Thread Safe in Asyncio)
+                save_history(item.get("unique_id"), item.get("name"), item.get("size"))
+                
+                local_success += 1
+                progress_stats["success"] += 1
+                batch_counter += 1
+                
+                # Status Update (Only Main Session updates to avoid rate limit)
+                # We update UI every 20 GLOBAL success
+                if progress_stats["success"] % 20 == 0:
+                    try:
+                        # Using app (Session 1) to edit status
+                        await status.edit(f"🔄 **Multi-Session Forwarding...**\n\nProgress: `{progress_stats['success']}` / `{total_items}`")
+                    except Exception: pass
+                
+                # SESSION ISOLATED BREAK LOGIC
+                if batch_counter >= BATCH_SIZE:
+                    print(f"[{session_name}] Taking Break...")
+                    await asyncio.sleep(BREAK_TIME)
+                    batch_counter = 0
+                else:
+                    await asyncio.sleep(PER_MSG_DELAY)
 
-    await status.edit(
-        f"🎉 **Task Completed!**\n\n"
-        f"✅ Total Forwarded: `{progress_tracker.success}`\n"
-        f"🗑️ Total Skipped: `{progress_tracker.skipped}`\n"
-        f"👥 Workers Used: `{num_workers}`"
-    )
+            except FloodWait as e:
+                print(f"[{session_name}] FloodWait: Sleeping {e.value}s")
+                # ONLY THIS SESSION SLEEPS
+                await asyncio.sleep(e.value + 5) 
+            except (MessageIdInvalid, MessageAuthorRequired):
+                print(f"[{session_name}] Skipping invalid msg")
+            except Exception as e:
+                print(f"[{session_name}] Error: {e}")
+
+    # 7. LAUNCH PARALLEL TASKS
+    tasks = []
+    for i, session in enumerate(active_sessions):
+        if i < len(chunks):
+            task_name = f"Session-{i+1}"
+            tasks.append(session_worker(session, chunks[i], task_name))
+    
+    # Run all sessions concurrently
+    await asyncio.gather(*tasks)
+
     GLOBAL_TASK_RUNNING = False
+    await status.edit(
+        f"🎉 **Multi-Session Task Completed!**\n\n"
+        f"✅ Total Forwarded: `{progress_stats['success']}`\n"
+        f"🗑️ Duplicates Skipped: `{skipped_count}`\n"
+        f"🤖 Sessions Used: `{num_sessions}`"
+    )
 
 # --- COMMANDS ---
 
-@app1.on_message(filters.command("start") & filters.create(only_admin))
+@app.on_message(filters.command("start") & filters.create(only_admin))
 async def start_msg(_, m):
     txt = (
-        "🤖 **Multi-Session Movie Bot (Termux/Render)**\n\n"
-        "**Index:** `/index`, `/index_full`, `/index_target`\n"
-        "**Forward:** `/forward_movie`, `/forward_full`\n"
-        "**Control:** `/stop`, `/stats`\n\n"
-        f"Running on: `{'Render (Web Enabled)' if IS_RENDER else 'Phone (Optimized)'}`"
+        "🤖 **Ultra Advanced Movie Bot (Multi-Session V2)**\n"
+        "_(Optimized for Speed, Safety & Partitioning)_\n\n"
+        "**📚 Indexing Commands (Source)**\n"
+        "`/index <channel>` - Sirf Movies index karega (Fast).\n"
+        "`/index_full <channel>` - Sab kuch index karega.\n\n"
+        "**🎯 Target Indexing (Duplicate Killer)**\n"
+        "`/index_target <channel>` - Target ko scan kare taaki duplicates na jayein.\n\n"
+        "**🚀 Forwarding Commands (Uses 3 Sessions)**\n"
+        "`/forward_movie <target_id> [limit]` - Movies forward kare.\n"
+        "`/forward_full <target_id> [limit]` - Full forward.\n\n"
+        "**⚙️ Utility**\n"
+        "`/stats` - Database aur Bot ka status dekhein.\n"
+        "`/stop` - Current task ko rokein.\n"
+        "`/sync` - Chat ID errors fix karein."
     )
     await m.reply(txt)
 
-@app1.on_message(filters.command("stats") & filters.create(only_admin))
+@app.on_message(filters.command("stats") & filters.create(only_admin))
 async def stats_cmd(_, m):
-    mov = len(json.load(open(DB_FILES["movie_source"]))) if os.path.exists(DB_FILES["movie_source"]) else 0
-    ids = len(target_cache["unique_ids"])
-    workers = len(WORKER_CLIENTS)
+    mov_src = len(json.load(open(DB_FILES["movie_source"]))) if os.path.exists(DB_FILES["movie_source"]) else 0
+    full_src = len(json.load(open(DB_FILES["full_source"]))) if os.path.exists(DB_FILES["full_source"]) else 0
     
+    cache_ids = len(target_cache["unique_ids"])
+    cache_names = len(target_cache["name_size"])
+    
+    # Active Sessions Check
+    active = [c.name for c in ALL_CLIENTS if c.is_connected]
+
     txt = (
-        "📊 **System Stats**\n\n"
-        f"⚡ Running: `{GLOBAL_TASK_RUNNING}`\n"
-        f"👥 Active Sessions: `{workers}`\n"
-        f"📱 Mode: `{'Render' if IS_RENDER else 'Termux'}`\n"
-        f"📂 Movie Source: `{mov}`\n"
-        f"🛡️ Cache Size: `{ids}`"
+        "📊 **Bot Statistics**\n\n"
+        f"⚡ **Task Running:** `{GLOBAL_TASK_RUNNING}`\n"
+        f"🤖 **Active Sessions:** `{len(active)}` ({', '.join(active)})\n"
+        f"🐢 **Break Time:** `{BREAK_TIME}s` after `{BATCH_SIZE}` msgs\n\n"
+        "**📂 Source Indexes:**\n"
+        f"Movies: `{mov_src}`\n"
+        f"Full: `{full_src}`\n\n"
+        "**🛡️ Duplicate Protection (Cache):**\n"
+        f"Unique IDs: `{cache_ids}`\n"
+        f"Name+Size Keys: `{cache_names}`"
     )
     await m.reply(txt)
 
-@app1.on_message(filters.command("stop") & filters.create(only_admin))
+@app.on_message(filters.command("sync") & filters.create(only_admin))
+async def sync_cmd(_, m):
+    msg = await m.reply("♻️ **Syncing Dialogs (Refreshing Cache)...**")
+    try:
+        count = 0
+        # Sync all clients
+        for client in ALL_CLIENTS:
+            if client.is_connected:
+                async for dialog in client.get_dialogs():
+                    count += 1
+        await msg.edit(f"✅ **Sync Complete!**\nFound `{count}` chats across all sessions.")
+    except Exception as e:
+        await msg.edit(f"❌ Sync Error: {e}")
+
+@app.on_message(filters.command("stop") & filters.create(only_admin))
 async def stop_cmd(_, m):
     global GLOBAL_TASK_RUNNING
     GLOBAL_TASK_RUNNING = False
-    await m.reply("🛑 **Stopping All Tasks...**\nWorkers will finish current batch and stop.")
+    await m.reply("🛑 **Stopping Task...**\nAgla batch process nahi hoga. All sessions stopping.")
 
 # --- INDEX HANDLERS ---
 
-@app1.on_message(filters.command("index") & filters.create(only_admin))
+@app.on_message(filters.command("index") & filters.create(only_admin))
 async def cmd_idx_mov(c, m):
     if len(m.command) < 2: return await m.reply("Usage: `/index @channel`")
     await indexing_engine(c, m, m.command[1], DB_FILES["movie_source"], mode="movie")
 
-@app1.on_message(filters.command("index_target") & filters.create(only_admin))
+@app.on_message(filters.command("index_target") & filters.create(only_admin))
 async def cmd_idx_tgt_mov(c, m):
     if len(m.command) < 2: return await m.reply("Usage: `/index_target @channel`")
     await indexing_engine(c, m, m.command[1], DB_FILES["movie_target"], mode="target")
 
-@app1.on_message(filters.command("index_full") & filters.create(only_admin))
+@app.on_message(filters.command("index_full") & filters.create(only_admin))
 async def cmd_idx_full(c, m):
     if len(m.command) < 2: return await m.reply("Usage: `/index_full @channel`")
     await indexing_engine(c, m, m.command[1], DB_FILES["full_source"], mode="all")
 
-@app1.on_message(filters.command("index_target_full") & filters.create(only_admin))
+@app.on_message(filters.command("index_target_full") & filters.create(only_admin))
 async def cmd_idx_tgt_full(c, m):
     if len(m.command) < 2: return await m.reply("Usage: `/index_target_full @channel`")
     await indexing_engine(c, m, m.command[1], DB_FILES["full_target"], mode="target")
 
-# --- FORWARD HANDLERS (ROUTED TO MANAGER) ---
+# --- FORWARD HANDLERS ---
 
-@app1.on_message(filters.command("forward_movie") & filters.create(only_admin))
+@app.on_message(filters.command("forward_movie") & filters.create(only_admin))
 async def cmd_fwd_mov(c, m):
     if len(m.command) < 2: return await m.reply("Usage: `/forward_movie <target> [limit]`")
     limit = m.command[2] if len(m.command) > 2 else None
-    await multi_session_forwarding_manager(m, DB_FILES["movie_source"], DB_FILES["movie_target"], m.command[1], limit)
+    await forwarding_engine(m, DB_FILES["movie_source"], DB_FILES["movie_target"], m.command[1], limit)
 
-@app1.on_message(filters.command("forward_full") & filters.create(only_admin))
+@app.on_message(filters.command("forward_full") & filters.create(only_admin))
 async def cmd_fwd_full(c, m):
     if len(m.command) < 2: return await m.reply("Usage: `/forward_full <target> [limit]`")
     limit = m.command[2] if len(m.command) > 2 else None
-    await multi_session_forwarding_manager(m, DB_FILES["full_source"], DB_FILES["full_target"], m.command[1], limit)
+    await forwarding_engine(m, DB_FILES["full_source"], DB_FILES["full_target"], m.command[1], limit)
 
-# --- RUNNER ---
+# --- MAIN RUNNER ---
 if __name__ == "__main__":
-    start_web_server()
-    print("🤖 Initializing Clients...")
+    print("🤖 Ultra Bot V2 Starting (Multi-Session)...")
     
-    # Start Clients Composition
-    app1.start()
-    if app2: app2.start()
-    if app3: app3.start()
+    # 1. Start Web Server (Conditional)
+    start_web_server() 
+
+    # 2. Start All Clients using Compose
+    # Only Clients defined (non-None) are added to ALL_CLIENTS
+    print(f"🚀 Initializing {len(ALL_CLIENTS)} Sessions...")
     
-    print(f"✅ Bot Started. Active Workers: {len(WORKER_CLIENTS)}")
-    
-    # Idle Loop to keep main process alive
-    from pyrogram import idle
-    idle()
-    
-    # Cleanup
-    app1.stop()
-    if app2: app2.stop()
-    if app3: app3.stop()
+    # Pyrogram Compose handles running multiple clients and idling
+    compose(ALL_CLIENTS)
