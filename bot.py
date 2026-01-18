@@ -1,4 +1,6 @@
 import os, re, json, asyncio, time
+from threading import Thread
+from flask import Flask
 from pyrogram import Client, filters, enums
 from pyrogram.errors import (
     FloodWait, ChatAdminRequired, InviteHashExpired, InviteHashInvalid, 
@@ -12,6 +14,21 @@ API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 SESSION_STRING = os.getenv("SESSION_STRING")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
+
+# --- WEB SERVER FOR RENDER (FIX FOR NO OPEN PORTS) ---
+app_web = Flask(__name__)
+
+@app_web.route('/')
+def home():
+    return "✅ Bot is Running Successfully! Port is Open."
+
+def run_web_server():
+    port = int(os.getenv("PORT", 8080))
+    app_web.run(host="0.0.0.0", port=port)
+
+def start_web_server():
+    t = Thread(target=run_web_server)
+    t.start()
 
 # --- ADVANCED CLIENT SETUP ---
 # Memory Mode ON & IPv6 Disabled for stability and speed
@@ -79,7 +96,7 @@ def get_media_details(m):
 
 async def resolve_chat_id(client, ref):
     """
-    Advanced Chat Resolver (From Reference Code).
+    Advanced Chat Resolver.
     Handles: IDs, Usernames, Invite Links.
     """
     ref_str = str(ref).strip()
@@ -363,7 +380,7 @@ async def forwarding_engine(message, source_db, target_db, destination_ref, limi
 @app.on_message(filters.command("start") & filters.create(only_admin))
 async def start_msg(_, m):
     txt = (
-        "🤖 **Ultra Advanced Movie Bot**\n"
+        "🤖 **Ultra Advanced Movie Bot (Render Fixed)**\n"
         "_(Optimized for Speed & Safety)_\n\n"
         "**📚 Indexing Commands (Source)**\n"
         "`/index <channel>` - Sirf Movies index karega (Fast).\n"
@@ -458,6 +475,6 @@ async def cmd_fwd_full(c, m):
 
 # --- MAIN RUNNER ---
 if __name__ == "__main__":
-    print("🤖 Ultra Advanced Bot Started...")
-    print(f"⚙️ Config: Break {BREAK_TIME}s after {BATCH_SIZE} msgs.")
-    app.run()
+    print("🤖 Bot Started with Web Server (Render Compatible)...")
+    start_web_server() # Pehle Web Server Start hoga
+    app.run()          # Phir Bot Start hoga
