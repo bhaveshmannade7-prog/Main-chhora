@@ -1,61 +1,48 @@
 from keep_alive import keep_alive
-# Web server start
 keep_alive()
 
-import os, re, json, asyncio, sys
+import os, re, json, asyncio, sys, time, datetime
 from pyrogram import Client, filters, idle
 from pyrogram.errors import (
-    FloodWait, PeerIdInvalid, UserAlreadyParticipant, UsernameInvalid
+    FloodWait, PeerIdInvalid, UserAlreadyParticipant, 
+    UsernameInvalid, ChannelPrivate, InviteHashInvalid
 )
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # --- CONFIGURATION CHECK ---
-print("⚙️ Loading Configuration...")
+print("⚙️ System Booting...")
+
+START_TIME = time.time()
 
 try:
     API_ID = int(os.getenv("API_ID", "0"))
     API_HASH = os.getenv("API_HASH")
-    SESSION1 = os.getenv("SESSION_STRING")       # Boss Account
-    SESSION2 = os.getenv("SESSION_STRING_2")     # Worker Account
-    ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))   # Admin ID
+    SESSION1 = os.getenv("SESSION_STRING")       # Boss
+    SESSION2 = os.getenv("SESSION_STRING_2")     # Worker
+    ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
     
-    # Validation
-    if not API_ID or not API_HASH:
-        print("❌ Error: API_ID ya API_HASH missing hai.")
-        sys.exit(1)
-    if not SESSION1:
-        print("❌ Error: SESSION_STRING (Boss) missing hai. Render Env Vars check karein.")
-        sys.exit(1)
-    if not SESSION2:
-        print("⚠️ Warning: SESSION_STRING_2 (Worker) missing hai. Bot 2 fail ho sakta hai.")
-    if ADMIN_ID == 0:
-        print("❌ Error: ADMIN_ID missing hai.")
+    if not (API_ID and API_HASH and SESSION1 and ADMIN_ID):
+        print("❌ CRITICAL: Env Vars Missing (API_ID, HASH, SESSION, or ADMIN_ID)")
         sys.exit(1)
 
 except ValueError:
-    print("❌ Error: API_ID aur ADMIN_ID sirf numbers hone chahiye.")
+    print("❌ Configuration Error: IDs must be numbers.")
     sys.exit(1)
 
-# --- INITIALIZE DUAL CLIENTS ---
-# in_memory=True zaruri hai taki Render par file permission ka issue na aaye
-bot1 = Client("boss_session", api_id=API_ID, api_hash=API_HASH, session_string=SESSION1, in_memory=True)
-bot2 = Client("worker_session", api_id=API_ID, api_hash=API_HASH, session_string=SESSION2, in_memory=True)
+# --- INITIALIZE CLIENTS (Memory Mode for Speed) ---
+bot1 = Client("boss", api_id=API_ID, api_hash=API_HASH, session_string=SESSION1, in_memory=True)
+bot2 = Client("worker", api_id=API_ID, api_hash=API_HASH, session_string=SESSION2, in_memory=True)
 
-# --- GLOBAL STATE ---
+# --- SETTINGS ---
 GLOBAL_TASK_RUNNING = False
-PER_MSG_DELAY = 1.0       
-BATCH_SIZE = 100          
-BREAK_TIME = 30           
+PER_MSG_DELAY = 0.8       # Optimized Speed
+BATCH_SIZE = 200          # Increased Batch
+BREAK_TIME = 15           
 
-# --- FILES ---
 DB_FILES = {
-    "movie_index": "db_movie_index.json",
-    "movie_target": "db_movie_target.json",
-    "series_index": "db_series_index.json",
-    "series_target": "db_series_target.json",
-    "full_index": "db_full_index.json",
-    "full_target": "db_full_target.json",
-    "bad_quality": "db_bad_quality.json",
+    "movie": "db_movie_index.json",
+    "series": "db_series_index.json",
+    "full": "db_full_index.json",
     "history": "db_forwarded_history.txt"
 }
 
@@ -63,38 +50,27 @@ DB_FILES = {
 processed_unique_ids = set()
 processed_name_size = set()
 
-# --- REGEX PATTERNS ---
+# --- REGEX ---
 SERIES_REGEX = re.compile(r"S\d{1,2}|Season|\bEp\b|Episode", re.IGNORECASE)
-BAD_QUALITY_REGEX = re.compile(
-    r"\b(?:cam|camrip|hdcam|ts|telesync|tc|pre-dvdrip|scr|screener|line audio|bad audio)\b", 
-    re.IGNORECASE
-)
-EPISODE_INFO_REGEX = re.compile(
-    r"(.*?)(?:S|Season)\s*(\d{1,2})\s*(?:E|Ep|Episode)\s*(\d{1,3})", 
-    re.IGNORECASE | re.DOTALL
-)
+BAD_QUALITY_REGEX = re.compile(r"\b(cam|camrip|hdcam|ts|telesync|tc|scr|screener)\b", re.IGNORECASE)
 
-# --- HELPER FUNCTIONS ---
+# --- UTILS ---
+
+def get_readable_time(seconds):
+    return str(datetime.timedelta(seconds=int(seconds)))
 
 def load_duplicates():
+    """Load history efficiently."""
     global processed_unique_ids, processed_name_size
     processed_unique_ids.clear()
     processed_name_size.clear()
     
+    # Load Text History
     if os.path.exists(DB_FILES["history"]):
         with open(DB_FILES["history"], "r") as f:
-            for line in f:
-                processed_unique_ids.add(line.strip())
+            processed_unique_ids.update(line.strip() for line in f)
 
-    for key in ["movie_target", "series_target", "full_target"]:
-        if os.path.exists(DB_FILES[key]):
-            try:
-                with open(DB_FILES[key], "r") as f:
-                    data = json.load(f)
-                    processed_unique_ids.update(data.get("unique_ids", []))
-                    processed_name_size.update(data.get("compound_keys", []))
-            except: pass
-    print(f"✅ Loaded {len(processed_unique_ids)} Unique IDs.")
+    print(f"✅ Database Loaded: {len(processed_unique_ids)} items.")
 
 def save_forwarded(unique_id, name, size):
     if unique_id:
@@ -104,310 +80,325 @@ def save_forwarded(unique_id, name, size):
     if name and size:
         processed_name_size.add(f"{name}-{size}")
 
-def get_media_details(m):
-    media = m.video or m.document or m.audio
-    if not media: return None, None, None
-    return getattr(media, 'file_name', None), getattr(media, 'file_size', 0), getattr(media, 'file_unique_id', None)
-
-async def resolve_chat(client, chat_ref):
+async def resolve_chat_smart(client, chat_input):
+    """
+    Handles Usernames (@channel), IDs (-100xxx), and Invite Links.
+    """
     try:
-        return await client.get_chat(chat_ref)
-    except (PeerIdInvalid, UsernameInvalid):
-        if "t.me" in str(chat_ref):
+        # 1. Check if Input is Integer ID (as string or int)
+        if str(chat_input).lstrip("-").isdigit():
+            chat_id = int(chat_input)
+            return await client.get_chat(chat_id)
+        
+        # 2. Check if Username
+        if str(chat_input).startswith("@"):
+            return await client.get_chat(chat_input)
+            
+        # 3. Check if Link (t.me)
+        if "t.me/" in str(chat_input):
             try:
-                return await client.join_chat(chat_ref)
+                return await client.join_chat(chat_input)
             except UserAlreadyParticipant:
+                # If already joined, we need to extract username/ID to get_chat
+                # This is tricky, so we rely on get_chat failing over
                 pass
-        raise ValueError(f"Chat access denied: {chat_ref}")
+                
+        # 4. Fallback: Try get_chat directly
+        return await client.get_chat(chat_input)
 
-async def join_sync(client, chat_ref):
-    try:
-        await client.join_chat(chat_ref)
-        return True
-    except UserAlreadyParticipant:
-        return True
+    except PeerIdInvalid:
+        raise ValueError("❌ Chat ID Invalid or Bot hasn't met this chat. Run /sync.")
+    except UsernameInvalid:
+        raise ValueError("❌ Invalid Username.")
     except Exception as e:
-        print(f"Join Error: {e}")
-        return False
+        raise ValueError(f"❌ Chat access failed: {e}")
 
-# --- INDEXING ENGINES ---
+# --- GLOBAL SYNC LOGIC (THE FIX) ---
+async def global_sync_engine(client, status_msg, bot_name):
+    """Iterates through ALL dialogs to refresh Pyrogram's Peer Cache."""
+    count = 0
+    try:
+        async for dialog in client.get_dialogs():
+            count += 1
+            # Just iterating is enough to cache the Access Hash
+    except Exception as e:
+        print(f"Sync Error {bot_name}: {e}")
+    return count
 
-async def generic_indexer(client, message, chat_ref, db_file, mode="all"):
+# --- INDEXER ---
+async def universal_indexer(client, message, chat_input, db_key, mode="all"):
     global GLOBAL_TASK_RUNNING
     GLOBAL_TASK_RUNNING = True
     
-    status = await message.reply(f"⏳ **Smart Indexing Started**\nMode: `{mode.upper()}`")
+    status = await message.reply(f"⏳ **Indexing Started...**\nTarget: `{chat_input}`\nMode: `{mode.upper()}`")
     
     try:
-        chat = await resolve_chat(client, chat_ref)
-        data_list = []
-        found_count = 0
+        chat = await resolve_chat_smart(client, chat_input)
+        data = []
+        found = 0
         
         async for m in client.get_chat_history(chat.id):
             if not GLOBAL_TASK_RUNNING:
-                await status.edit("🛑 Task Stopped.")
+                await status.edit("🛑 Stopped.")
                 return
 
             if not (m.video or m.document): continue
-
-            file_name, file_size, unique_id = get_media_details(m)
-            if not unique_id: continue
-
+            
+            # Smart Extraction
+            media = m.video or m.document or m.audio
+            fname = getattr(media, 'file_name', "") or ""
+            fsize = getattr(media, 'file_size', 0)
+            uid = getattr(media, 'file_unique_id', None)
+            
+            if not uid: continue
+            
+            # Filtering
             caption = m.caption or ""
-            text_check = f"{file_name} {caption}"
-            is_series = bool(SERIES_REGEX.search(text_check))
+            full_text = f"{fname} {caption}"
+            is_series = bool(SERIES_REGEX.search(full_text))
             
             if mode == "movie" and is_series: continue
-            elif mode == "series" and not is_series: continue
-            elif mode == "bad" and not BAD_QUALITY_REGEX.search(text_check): continue
+            if mode == "series" and not is_series: continue
             
-            meta = {}
-            if mode == "series":
-                match = EPISODE_INFO_REGEX.search(text_check)
-                if match:
-                    meta = {"name": match.group(1).strip(), "season": int(match.group(2)), "episode": int(match.group(3))}
-                else:
-                    meta = {"name": file_name, "season": 1, "episode": 999}
-
-            data_list.append({
+            data.append({
                 "msg_id": m.id,
                 "chat_id": chat.id,
-                "unique_id": unique_id,
-                "name": file_name,
-                "size": file_size,
-                "meta": meta
+                "unique_id": uid,
+                "name": fname,
+                "size": fsize
             })
-            found_count += 1
-            if found_count % 1000 == 0:
-                print(f"Indexed: {found_count}")
+            found += 1
+            if found % 500 == 0: await status.edit(f"⚡ Scanning... Found: {found}")
 
-        if mode in ["all", "movie", "bad"]: data_list.reverse()
-        elif mode == "series": data_list.sort(key=lambda x: (x['meta'].get('name', ''), x['meta'].get('season', 0), x['meta'].get('episode', 0)))
-
-        with open(db_file, "w", encoding="utf-8") as f:
-            json.dump(data_list, f, indent=2)
-
-        await status.edit(f"✅ **Saved!** Total: {found_count}")
-
+        # Sorting: Oldest First for proper forwarding
+        data.reverse()
+        
+        with open(DB_FILES[db_key], "w") as f:
+            json.dump(data, f)
+            
+        await status.edit(f"✅ **Indexing Success!**\n📂 File: `{DB_FILES[db_key]}`\n🔢 Total: `{found}`")
+        
     except Exception as e:
         await status.edit(f"❌ Error: {e}")
     finally:
         GLOBAL_TASK_RUNNING = False
 
-async def target_indexer(client, message, chat_ref, db_file):
-    status = await message.reply("⏳ **Target Syncing...**")
-    try:
-        chat = await resolve_chat(client, chat_ref)
-        u_ids = set()
-        c_keys = set()
-        
-        async for m in client.get_chat_history(chat.id):
-            file_name, file_size, unique_id = get_media_details(m)
-            if unique_id: u_ids.add(unique_id)
-            if file_name and file_size: c_keys.add(f"{file_name}-{file_size}")
-        
-        with open(db_file, "w") as f:
-            json.dump({"unique_ids": list(u_ids), "compound_keys": list(c_keys)}, f)
-        
-        load_duplicates()
-        await status.edit(f"✅ **Target Synced!** IDs: {len(u_ids)}")
-    except Exception as e:
-        await status.edit(f"❌ Error: {e}")
-
-# --- DUAL-CORE FORWARDING ---
-
-async def forward_worker(client, target_id, batch, worker_name, status_msg, progress_dict):
-    local_count = 0
+# --- DUAL CORE FORWARDER ---
+async def forward_engine(client, target_id, batch, name, prog_dict):
     for item in batch:
         if not GLOBAL_TASK_RUNNING: break
         
-        msg_id = item['msg_id']
-        src_id = item['chat_id']
-        unique_id = item.get('unique_id')
-        name = item.get('name')
-        size = item.get('size')
+        uid = item.get('unique_id')
+        key = f"{item.get('name')}-{item.get('size')}"
         
-        compound_key = f"{name}-{size}"
-        if unique_id in processed_unique_ids or compound_key in processed_name_size:
+        # Real-time Duplicate Check
+        if uid in processed_unique_ids or key in processed_name_size:
             continue
-
-        try:
-            await client.forward_messages(target_id, src_id, msg_id)
-            save_forwarded(unique_id, name, size)
-            local_count += 1
-            progress_dict[worker_name] += 1
             
-            if local_count % BATCH_SIZE == 0: await asyncio.sleep(BREAK_TIME)
-            else: await asyncio.sleep(PER_MSG_DELAY)
-
+        try:
+            await client.forward_messages(target_id, item['chat_id'], item['msg_id'])
+            save_forwarded(uid, item.get('name'), item.get('size'))
+            prog_dict[name] += 1
+            await asyncio.sleep(PER_MSG_DELAY)
         except FloodWait as e:
             await asyncio.sleep(e.value + 2)
         except Exception as e:
-            print(f"[{worker_name}] Error: {e}")
+            print(f"[{name}] Err: {e}")
 
-async def dual_forwarder(message, db_file, target_ref, limit=None):
+async def start_forwarding(m, db_key, target_input, limit=None):
     global GLOBAL_TASK_RUNNING
     GLOBAL_TASK_RUNNING = True
+    status = await m.reply("🚀 **Initializing Dual-Core...**")
     
-    status = await message.reply("🚀 **Preparing Dual-Core Forwarding...**")
-    
-    if not os.path.exists(db_file):
-        await status.edit("❌ DB missing.")
-        GLOBAL_TASK_RUNNING = False
-        return
+    if not os.path.exists(DB_FILES.get(db_key, "")):
+        return await status.edit("❌ Index file not found.")
 
-    with open(db_file, "r") as f:
-        data = json.load(f)
+    with open(DB_FILES[db_key], "r") as f:
+        raw_data = json.load(f)
 
+    # Filter Duplicates BEFORE splitting
     load_duplicates()
-    clean_data = []
-    for item in data:
-        u_id = item.get('unique_id')
-        key = f"{item.get('name')}-{item.get('size')}"
-        if u_id not in processed_unique_ids and key not in processed_name_size:
-            clean_data.append(item)
+    clean_data = [
+        d for d in raw_data 
+        if d['unique_id'] not in processed_unique_ids 
+        and f"{d.get('name')}-{d.get('size')}" not in processed_name_size
+    ]
     
     if limit: clean_data = clean_data[:int(limit)]
-    total_items = len(clean_data)
-    
-    if total_items == 0:
-        await status.edit("✅ No new files.")
-        GLOBAL_TASK_RUNNING = False
-        return
+    if not clean_data: return await status.edit("✅ All files already forwarded!")
 
     try:
-        tgt = await resolve_chat(bot1, target_ref)
-        tgt_id = tgt.id
-        await join_sync(bot2, target_ref)
+        tgt = await resolve_chat_smart(bot1, target_input)
+        # Ensure Bot2 can see target
+        try: await bot2.get_chat(tgt.id)
+        except: await status.edit(f"⚠️ **Worker Bot** cannot access Target. Add Bot 2 to admin.")
     except Exception as e:
-        await status.edit(f"❌ Target Error: {e}")
-        GLOBAL_TASK_RUNNING = False
-        return
+        return await status.edit(f"❌ Target Error: {e}")
 
-    list_1 = clean_data[0::2]
-    list_2 = clean_data[1::2]
-
-    await status.edit(f"⚡ **Started!** Boss: {len(list_1)} | Worker: {len(list_2)}")
+    # Odd-Even Split
+    task1_data = clean_data[0::2]
+    task2_data = clean_data[1::2]
+    total = len(clean_data)
     
-    progress = {"Boss": 0, "Worker": 0}
+    prog = {"Boss": 0, "Worker": 0}
     
-    async def update_ui():
+    # UI Updater
+    async def ui_loop():
         while GLOBAL_TASK_RUNNING:
-            done = progress["Boss"] + progress["Worker"]
-            if done >= total_items: break
+            done = prog["Boss"] + prog["Worker"]
+            if done >= total: break
             try:
                 await status.edit(
-                    f"⚡ **Progress:** `{done}/{total_items}`\nBoss: {progress['Boss']} | Worker: {progress['Worker']}",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 STOP", callback_data="stop")]])
+                    f"⚡ **Forwarding in Progress**\n"
+                    f"📊 Progress: `{done} / {total}`\n"
+                    f"🤖 Boss: `{prog['Boss']}` | 👷 Worker: `{prog['Worker']}`",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 STOP", "stop")]])
                 )
             except: pass
-            await asyncio.sleep(5)
+            await asyncio.sleep(4)
 
-    ui_task = asyncio.create_task(update_ui())
-    task1 = asyncio.create_task(forward_worker(bot1, tgt_id, list_1, "Boss", status, progress))
-    task2 = asyncio.create_task(forward_worker(bot2, tgt_id, list_2, "Worker", status, progress))
+    asyncio.create_task(ui_loop())
     
-    await asyncio.gather(task1, task2)
+    # Run Both Bots
+    await asyncio.gather(
+        forward_engine(bot1, tgt.id, task1_data, "Boss", prog),
+        forward_engine(bot2, tgt.id, task2_data, "Worker", prog)
+    )
+    
     GLOBAL_TASK_RUNNING = False
-    await ui_task
-    await status.edit("✅ **Completed!**")
+    await status.edit(f"✅ **Batch Completed!**\nTotal Sent: {prog['Boss'] + prog['Worker']}")
 
 # --- COMMANDS ---
 
 @bot1.on_message(filters.command("start") & filters.user(ADMIN_ID))
-async def start_msg(_, m):
+async def start(_, m):
     await m.reply(
-        "🔥 **DUAL-CORE BOT ONLINE**\n"
-        "`/sync @channel` - Join & Sync\n"
-        "`/index @channel` - Index Movie\n"
-        "`/index_target @channel` - Target Movie\n"
-        "`/index_full @channel` - Index All\n"
-        "`/index_target_full @channel` - Target All\n"
-        "`/forward movie @target`\n"
-        "`/forward full @target`\n"
-        "`/stop` - Stop"
+        "🔰 **ADVANCED DUAL-BOT CONTROLLER** 🔰\n\n"
+        "🔄 **System Sync:**\n"
+        "`/sync` - Auto-refresh both bots (Fixes 'Chat not found')\n"
+        "`/stats` - View System Health & Uptime\n\n"
+        "📂 **Indexing:**\n"
+        "`/index <username/id>` - Movies Only\n"
+        "`/index_series <username/id>` - Series Only\n"
+        "`/index_full <username/id>` - Everything\n\n"
+        "🚀 **Forwarding:**\n"
+        "`/forward movie <target>`\n"
+        "`/forward series <target>`\n"
+        "`/forward full <target>`\n"
+        "*Usage: Target can be @channel or -100123456*"
     )
 
-@bot1.on_message(filters.command("stop") & filters.user(ADMIN_ID))
-async def stop_handler(_, m):
-    global GLOBAL_TASK_RUNNING
-    GLOBAL_TASK_RUNNING = False
-    await m.reply("🛑 Stopping...")
-
-@bot1.on_callback_query(filters.regex("stop"))
-async def stop_cb(_, q):
-    global GLOBAL_TASK_RUNNING
-    if q.from_user.id != ADMIN_ID: return
-    GLOBAL_TASK_RUNNING = False
-    await q.answer()
-    await q.message.edit("🛑 **STOPPED**")
-
-@bot1.on_message(filters.command("ping") & filters.user(ADMIN_ID))
-async def ping_handler(_, m):
-    try:
-        me1 = await bot1.get_me()
-        me2 = await bot2.get_me()
-        await m.reply(f"✅ Bot1: `{me1.first_name}`\n✅ Bot2: `{me2.first_name}`")
-    except Exception as e:
-        await m.reply(f"⚠️ Error: {e}")
-
 @bot1.on_message(filters.command("sync") & filters.user(ADMIN_ID))
-async def sync_command(c, m):
-    if len(m.command) < 2: return await m.reply("Usage: `/sync @channel`")
-    chat_ref = m.command[1]
-    status = await m.reply("♻️ **Syncing...**")
-    try:
-        await join_sync(bot1, chat_ref)
-        await join_sync(bot2, chat_ref)
-        await target_indexer(c, m, chat_ref, DB_FILES["full_target"])
-    except Exception as e:
-        await status.edit(f"❌ Failed: {e}")
+async def sync_handler(c, m):
+    """Global Sync: Refreshes Dialogs for BOTH bots."""
+    msg = await m.reply("♻️ **Global Sync Started...**\nConnecting to all cached chats...")
+    
+    start = time.time()
+    
+    # Run get_dialogs for both concurrently
+    task1 = asyncio.create_task(global_sync_engine(bot1, msg, "Boss"))
+    task2 = asyncio.create_task(global_sync_engine(bot2, msg, "Worker"))
+    
+    results = await asyncio.gather(task1, task2)
+    end = time.time()
+    
+    txt = (
+        f"✅ **Sync Complete!**\n"
+        f"⏱ Time: `{round(end-start, 2)}s`\n\n"
+        f"🤖 Boss Cached: `{results[0]}` chats\n"
+        f"👷 Worker Cached: `{results[1]}` chats\n\n"
+        "💡 *Ab aap `/index` command chala sakte hain, ID error nahi aayega.*"
+    )
+    await msg.edit(txt)
+
+@bot1.on_message(filters.command("stats") & filters.user(ADMIN_ID))
+async def stats_handler(c, m):
+    msg = await m.reply("📊 **Fetching System Stats...**")
+    
+    # Calculate Ping
+    start = time.time()
+    await bot1.get_me()
+    ping1 = round((time.time() - start) * 1000, 2)
+    
+    start = time.time()
+    await bot2.get_me()
+    ping2 = round((time.time() - start) * 1000, 2)
+    
+    # DB Stats
+    history_count = len(processed_unique_ids)
+    uptime = get_readable_time(time.time() - START_TIME)
+    
+    txt = (
+        "📊 **SYSTEM STATUS DASHBOARD**\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"⏱ **Uptime:** `{uptime}`\n"
+        f"💾 **History DB:** `{history_count}` files\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"🤖 **Boss Bot:**\n"
+        f"   - Ping: `{ping1}ms`\n"
+        f"   - Status: ✅ Online\n"
+        f"👷 **Worker Bot:**\n"
+        f"   - Ping: `{ping2}ms`\n"
+        f"   - Status: ✅ Online\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "✅ *Server is Healthy*"
+    )
+    await msg.edit(txt)
 
 @bot1.on_message(filters.command("index") & filters.user(ADMIN_ID))
-async def cmd_idx_movie(c, m): await generic_indexer(c, m, m.command[1], DB_FILES["movie_index"], mode="movie")
+async def cmd_idx_movie(c, m):
+    if len(m.command) < 2: return await m.reply("Example: `/index -100123456`")
+    await universal_indexer(c, m, m.command[1], "movie", "movie")
 
-@bot1.on_message(filters.command("index_target") & filters.user(ADMIN_ID))
-async def cmd_idx_tgt_movie(c, m): await target_indexer(c, m, m.command[1], DB_FILES["movie_target"])
+@bot1.on_message(filters.command("index_series") & filters.user(ADMIN_ID))
+async def cmd_idx_series(c, m):
+    if len(m.command) < 2: return await m.reply("Example: `/index_series @channel`")
+    await universal_indexer(c, m, m.command[1], "series", "series")
 
 @bot1.on_message(filters.command("index_full") & filters.user(ADMIN_ID))
-async def cmd_idx_full(c, m): await generic_indexer(c, m, m.command[1], DB_FILES["full_index"], mode="all")
-
-@bot1.on_message(filters.command("index_target_full") & filters.user(ADMIN_ID))
-async def cmd_idx_tgt_full(c, m): await target_indexer(c, m, m.command[1], DB_FILES["full_target"])
+async def cmd_idx_full(c, m):
+    if len(m.command) < 2: return await m.reply("Example: `/index_full https://t.me/...`")
+    await universal_indexer(c, m, m.command[1], "full", "all")
 
 @bot1.on_message(filters.command("forward") & filters.user(ADMIN_ID))
-async def cmd_forward(_, m):
-    if len(m.command) < 3: return await m.reply("Usage: `/forward <type> <target>`")
-    db_map = {"movie": DB_FILES["movie_index"], "full": DB_FILES["full_index"]}
-    db_type = m.command[1].lower()
-    if db_type not in db_map: return await m.reply("❌ Use `movie` or `full`")
-    await dual_forwarder(m, db_map[db_type], m.command[2], m.command[3] if len(m.command) > 3 else None)
+async def cmd_fwd(c, m):
+    if len(m.command) < 3: return await m.reply("Usage: `/forward <mode> <target_id>`")
+    mode = m.command[1].lower()
+    if mode not in DB_FILES: return await m.reply("❌ Mode must be: `movie`, `series`, `full`")
+    await start_forwarding(m, mode, m.command[2], m.command[3] if len(m.command) > 3 else None)
 
-# --- MAIN EXECUTION ---
+@bot1.on_message(filters.command("stop") & filters.user(ADMIN_ID))
+async def cmd_stop(c, m):
+    global GLOBAL_TASK_RUNNING
+    GLOBAL_TASK_RUNNING = False
+    await m.reply("🛑 **Force Stopping Tasks...**")
+
+@bot1.on_callback_query(filters.regex("stop"))
+async def cb_stop(c, q):
+    if q.from_user.id == ADMIN_ID:
+        global GLOBAL_TASK_RUNNING
+        GLOBAL_TASK_RUNNING = False
+        await q.answer("Stopping...")
+        await q.message.edit("🛑 **Task Cancelled**")
+
+# --- MAIN LOOP ---
 async def main():
-    print("🤖 Starting Bots...")
-    # Error handling during startup
+    print("🤖 Launching Bots...")
     try:
         await bot1.start()
-    except Exception as e:
-        print(f"❌ BOSS BOT FAILED: {e}")
-        print("💡 Check SESSION_STRING in Render.")
-        sys.exit(1)
-
-    try:
         await bot2.start()
     except Exception as e:
-        print(f"⚠️ WORKER BOT FAILED: {e}")
-        print("💡 Continuing with Boss only...")
-
-    # Notify Admin
-    try:
-        await bot1.send_message(ADMIN_ID, "✅ **Bot Restarted!**\nSend `/start`")
-    except:
-        print("⚠️ Failed to send start message.")
+        print(f"❌ Startup Error: {e}")
+        return
 
     load_duplicates()
-    print("🔥 Ready!")
+    
+    # Auto-Notify Admin
+    try:
+        await bot1.send_message(ADMIN_ID, "✅ **Bot is Live!**\nRun `/sync` first to refresh cache.")
+    except: pass
+    
+    print("🔥 System Ready!")
     await idle()
     await bot1.stop()
     await bot2.stop()
