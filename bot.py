@@ -1187,89 +1187,93 @@ async def forward_full_cmd(_, message):
                 reply_markup=STOP_BUTTON
             )
             
-            try:
-                for item in full_media_list:
-                    if not GLOBAL_TASK_RUNNING: break
+                        # --- DUAL CLIENT QUEUE SYSTEM ---
+            queue = asyncio.Queue()
+            
+            # 1. Queue bharna (Duplicates filter karke)
+            skipped_dupes = 0
+            queued_items = []
+            
+            for item in full_media_list:
+                # Limit check
+                if fwd_limit and len(queued_items) >= fwd_limit:
+                    break
                     
-                    processed_count += 1
-                    message_id = item["message_id"]
+                unique_id = item.get("file_unique_id")
+                file_name = item.get("file_name")
+                file_size = item.get("file_size")
+                compound_key = f"{file_name}-{file_size}" if file_name and file_size else None
+                
+                # Check Duplicates BEFORE putting in queue
+                if (unique_id and unique_id in full_fwd_unique_ids) or \
+                   (compound_key and compound_key in full_target_compound_keys):
+                    duplicate_count += 1
+                    continue
+                
+                queue.put_nowait(item)
+                queued_items.append(item) # Just for counting
+            
+            total_to_process = queue.qsize()
+            await status.edit_text(f"✅ Queue Ready!\nItems to Forward: {total_to_process}\nDuplicates Removed: {duplicate_count}\n\n🚀 Starting Dual Engine (Boss + Worker)...", reply_markup=STOP_BUTTON)
+            
+            # 2. Worker Function (Jo dono clients use karenge)
+            async def worker_engine(client_obj, worker_name):
+                nonlocal forwarded_count, GLOBAL_TASK_RUNNING
+                
+                while GLOBAL_TASK_RUNNING and not queue.empty():
+                    try:
+                        item = queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                        
+                    msg_id = item["message_id"]
                     src_id = item["chat_id"]
+                    unique_id = item.get("file_unique_id")
                     file_name = item.get("file_name")
                     file_size = item.get("file_size")
-                    unique_id = item.get("file_unique_id")
-                    compound_key = f"{file_name}-{file_size}" if file_name and file_size is not None else None
-
+                    compound_key = f"{file_name}-{file_size}" if file_name and file_size else None
+                    
                     try:
-                        # Full forward ke sets check karo
-                        if (unique_id and unique_id in full_fwd_unique_ids) or \
-                           (compound_key and compound_key in full_target_compound_keys):
-                            duplicate_count += 1
-                            continue
-                        
                         if mode_copy:
-                            await app.copy_message(tgt, src_id, message_id)
+                            await client_obj.copy_message(tgt, src_id, msg_id)
                         else:
-                            await app.forward_messages(tgt, src_id, message_id)
-                        
-                        save_forwarded_id(unique_id, compound_key, db_type="full") # db_type="full"
+                            await client_obj.forward_messages(tgt, src_id, msg_id)
+                            
+                        # Success: Database update karo
+                        save_forwarded_id(unique_id, compound_key, db_type="full")
                         forwarded_count += 1
                         
+                        # Speed control (Double engine hai, thoda delay rakho safe rehne ke liye)
                         await asyncio.sleep(PER_MSG_DELAY) 
                         
                     except FloodWait as e:
-                        await status.edit_text(f"⏳ FloodWait: sleeping {e.value}s…", reply_markup=STOP_BUTTON)
+                        print(f"[{worker_name}] FloodWait: {e.value}s")
+                        # Agar FloodWait aaya, toh item wapas queue me daal do ya retry karo
+                        # Yahan hum bas wait kar rahe hain
                         await asyncio.sleep(e.value)
-                    except (MessageIdInvalid, MessageAuthorRequired):
-                        print(f"[FWD_FULL ERR] Skipping deleted/invalid msg {message_id}")
-                        continue
-                    except RPCError as e:
-                        print(f"[FWD_FULL RPCError] Skipping msg {message_id}: {e}")
-                        continue
+                        # Retry logic is simple: skip for now or re-queue. 
+                        # Re-queueing might cause infinite loop if strict, so we skip/log here.
                     except Exception as e:
-                        print(f"[FWD_FULL ERROR] Skipping msg {message_id}: {e}")
-                        continue
-                    
-                    if (forwarded_count % 50 == 0) or (processed_count % 500 == 0):
-                        try:
-                            await status.edit_text(
-                                f"✅ Fwd: `{forwarded_count}` / {total_to_forward_num}, 🔍 Dup: `{duplicate_count}`\n"
-                                f"⏳ Processed: {processed_count} / {total_in_index}",
-                                reply_markup=STOP_BUTTON
-                            )
-                        except FloodWait: pass 
-
-                    if forwarded_count > 0 and forwarded_count % BATCH_SIZE_FOR_BREAK == 0 and GLOBAL_TASK_RUNNING:
-                        try:
-                            await status.edit_text(
-                                f"✅ Fwd: `{forwarded_count}`. Batch complete.\n"
-                                f"☕ {BREAK_DURATION_SEC} second ka break le raha hoon...",
-                                reply_markup=STOP_BUTTON
-                            )
-                        except FloodWait: pass
+                        print(f"[{worker_name}] Error: {e}")
+                    finally:
+                        queue.task_done()
                         
-                        await asyncio.sleep(BREAK_DURATION_SEC) 
-                    
-                    if fwd_limit and forwarded_count >= fwd_limit:
-                        break
+                    # Status Update (Sirf Boss karega taaki flood na ho)
+                    if worker_name == "BOSS" and forwarded_count % 10 == 0:
+                        try:
+                            await status.edit_text(
+                                f"🚀 Dual Engine Running...\n"
+                                f"✅ Forwarded: `{forwarded_count}` / {total_to_process}\n"
+                                f"📦 Queue Left: `{queue.qsize()}`",
+                                reply_markup=STOP_BUTTON
+                            )
+                        except: pass
 
-            except Exception as e:
-                await status.edit_text(f"❌ Error: `{e}`", reply_markup=None)
-                return
+            # 3. Tasks start karna (Boss aur Worker parallel)
+            task1 = asyncio.create_task(worker_engine(bot, "BOSS"))
+            task2 = asyncio.create_task(worker_engine(worker, "WORKER"))
             
-            final_message = f"🎉 **Full Forwarding Complete!**\n"
-            if not GLOBAL_TASK_RUNNING:
-                final_message = f"🛑 **Full Forwarding Stopped!**\n"
-            
-            await status.edit_text(
-                f"{final_message}"
-                f"✅ Total Forwarded: `{forwarded_count}`\n"
-                f"🔍 Duplicates Skipped: `{duplicate_count}`",
-                reply_markup=None
-            )
-        finally:
-            GLOBAL_TASK_RUNNING = False
-
-    app.loop.create_task(runner())
+            await asyncio.gather(task1, task2)
 
 # ------------------------------------
     
