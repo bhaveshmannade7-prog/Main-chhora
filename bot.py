@@ -3,7 +3,7 @@ keep_alive()
 
 import os, time, re, json
 import asyncio
-from pyrogram import Client, filters, enums
+from pyrogram import Client, filters, enums, idle, compose
 from pyrogram.errors import (
     FloodWait, ChatAdminRequired, InviteHashExpired, InviteHashInvalid, 
     PeerIdInvalid, UserAlreadyParticipant, MessageIdInvalid, MessageAuthorRequired, 
@@ -13,8 +13,19 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
-SESSION_STRING = os.getenv("SESSION_STRING")
+SESSION1 = os.getenv("SESSION1") # Boss
+SESSION2 = os.getenv("SESSION2") # Worker
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
+
+# --- Dual Client Setup ---
+# Boss (Commands + Forwarding)
+bot = Client("boss", api_id=API_ID, api_hash=API_HASH, session_string=SESSION1)
+# Worker (Only Forwarding helper)
+worker = Client("worker", api_id=API_ID, api_hash=API_HASH, session_string=SESSION2)
+
+# Hum commands sirf Boss (bot) par register karenge, lekin 'app' variable ko 
+# compatibility ke liye 'bot' se map kar rahe hain.
+app = bot 
 
 # Session via string (Pyrogram v2)
 app = Client("user", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
