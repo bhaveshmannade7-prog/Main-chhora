@@ -1,30 +1,45 @@
 from keep_alive import keep_alive
+# Web server start
 keep_alive()
 
-import os, re, json, asyncio
-from pyrogram import Client, filters, enums, idle
+import os, re, json, asyncio, sys
+from pyrogram import Client, filters, idle
 from pyrogram.errors import (
-    FloodWait, ChatAdminRequired, InviteHashExpired, InviteHashInvalid, 
-    PeerIdInvalid, UserAlreadyParticipant, MessageIdInvalid, MessageAuthorRequired, 
-    RPCError, UsernameInvalid, ChannelPrivate
+    FloodWait, PeerIdInvalid, UserAlreadyParticipant, UsernameInvalid
 )
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# --- CONFIGURATION ---
-# Ensure env vars are loaded correctly
+# --- CONFIGURATION CHECK ---
+print("⚙️ Loading Configuration...")
+
 try:
-    API_ID = int(os.getenv("API_ID"))
+    API_ID = int(os.getenv("API_ID", "0"))
     API_HASH = os.getenv("API_HASH")
     SESSION1 = os.getenv("SESSION_STRING")       # Boss Account
     SESSION2 = os.getenv("SESSION_STRING_2")     # Worker Account
-    ADMIN_ID = int(os.getenv("ADMIN_ID"))        # Must be Integer
-except Exception as e:
-    print(f"❌ Configuration Error: {e}")
-    exit(1)
+    ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))   # Admin ID
+    
+    # Validation
+    if not API_ID or not API_HASH:
+        print("❌ Error: API_ID ya API_HASH missing hai.")
+        sys.exit(1)
+    if not SESSION1:
+        print("❌ Error: SESSION_STRING (Boss) missing hai. Render Env Vars check karein.")
+        sys.exit(1)
+    if not SESSION2:
+        print("⚠️ Warning: SESSION_STRING_2 (Worker) missing hai. Bot 2 fail ho sakta hai.")
+    if ADMIN_ID == 0:
+        print("❌ Error: ADMIN_ID missing hai.")
+        sys.exit(1)
+
+except ValueError:
+    print("❌ Error: API_ID aur ADMIN_ID sirf numbers hone chahiye.")
+    sys.exit(1)
 
 # --- INITIALIZE DUAL CLIENTS ---
-bot1 = Client("boss_session", api_id=API_ID, api_hash=API_HASH, session_string=SESSION1)
-bot2 = Client("worker_session", api_id=API_ID, api_hash=API_HASH, session_string=SESSION2)
+# in_memory=True zaruri hai taki Render par file permission ka issue na aaye
+bot1 = Client("boss_session", api_id=API_ID, api_hash=API_HASH, session_string=SESSION1, in_memory=True)
+bot2 = Client("worker_session", api_id=API_ID, api_hash=API_HASH, session_string=SESSION2, in_memory=True)
 
 # --- GLOBAL STATE ---
 GLOBAL_TASK_RUNNING = False
@@ -62,7 +77,6 @@ EPISODE_INFO_REGEX = re.compile(
 # --- HELPER FUNCTIONS ---
 
 def load_duplicates():
-    """Load history to prevent duplicate forwarding."""
     global processed_unique_ids, processed_name_size
     processed_unique_ids.clear()
     processed_name_size.clear()
@@ -80,7 +94,7 @@ def load_duplicates():
                     processed_unique_ids.update(data.get("unique_ids", []))
                     processed_name_size.update(data.get("compound_keys", []))
             except: pass
-    print(f"✅ Loaded {len(processed_unique_ids)} Unique IDs & {len(processed_name_size)} Name+Size keys.")
+    print(f"✅ Loaded {len(processed_unique_ids)} Unique IDs.")
 
 def save_forwarded(unique_id, name, size):
     if unique_id:
@@ -96,7 +110,6 @@ def get_media_details(m):
     return getattr(media, 'file_name', None), getattr(media, 'file_size', 0), getattr(media, 'file_unique_id', None)
 
 async def resolve_chat(client, chat_ref):
-    """Smart Chat Resolver."""
     try:
         return await client.get_chat(chat_ref)
     except (PeerIdInvalid, UsernameInvalid):
@@ -105,10 +118,9 @@ async def resolve_chat(client, chat_ref):
                 return await client.join_chat(chat_ref)
             except UserAlreadyParticipant:
                 pass
-        raise ValueError("Chat access denied. Make sure bot is in the channel.")
+        raise ValueError(f"Chat access denied: {chat_ref}")
 
 async def join_sync(client, chat_ref):
-    """Force join a chat."""
     try:
         await client.join_chat(chat_ref)
         return True
@@ -124,23 +136,17 @@ async def generic_indexer(client, message, chat_ref, db_file, mode="all"):
     global GLOBAL_TASK_RUNNING
     GLOBAL_TASK_RUNNING = True
     
-    status = await message.reply(f"⏳ **Smart Indexing Started**\nMode: `{mode.upper()}`\nFetching history...")
+    status = await message.reply(f"⏳ **Smart Indexing Started**\nMode: `{mode.upper()}`")
     
     try:
         chat = await resolve_chat(client, chat_ref)
         data_list = []
         found_count = 0
-        scanned_count = 0
         
         async for m in client.get_chat_history(chat.id):
             if not GLOBAL_TASK_RUNNING:
                 await status.edit("🛑 Task Stopped.")
                 return
-
-            scanned_count += 1
-            if scanned_count % 1000 == 0:
-                try: await status.edit(f"🔍 Scanned: {scanned_count} msgs\nFound: {found_count} valid media")
-                except: pass
 
             if not (m.video or m.document): continue
 
@@ -172,16 +178,16 @@ async def generic_indexer(client, message, chat_ref, db_file, mode="all"):
                 "meta": meta
             })
             found_count += 1
+            if found_count % 1000 == 0:
+                print(f"Indexed: {found_count}")
 
-        await status.edit("⏳ Scanning Complete. Sorting & Saving...")
-        
         if mode in ["all", "movie", "bad"]: data_list.reverse()
         elif mode == "series": data_list.sort(key=lambda x: (x['meta'].get('name', ''), x['meta'].get('season', 0), x['meta'].get('episode', 0)))
 
         with open(db_file, "w", encoding="utf-8") as f:
             json.dump(data_list, f, indent=2)
 
-        await status.edit(f"✅ **Index Saved!**\nFile: `{db_file}`\nTotal Items: {found_count}")
+        await status.edit(f"✅ **Saved!** Total: {found_count}")
 
     except Exception as e:
         await status.edit(f"❌ Error: {e}")
@@ -204,7 +210,7 @@ async def target_indexer(client, message, chat_ref, db_file):
             json.dump({"unique_ids": list(u_ids), "compound_keys": list(c_keys)}, f)
         
         load_duplicates()
-        await status.edit(f"✅ **Target Synced & Updated!**\nFound IDs: {len(u_ids)}")
+        await status.edit(f"✅ **Target Synced!** IDs: {len(u_ids)}")
     except Exception as e:
         await status.edit(f"❌ Error: {e}")
 
@@ -246,7 +252,7 @@ async def dual_forwarder(message, db_file, target_ref, limit=None):
     status = await message.reply("🚀 **Preparing Dual-Core Forwarding...**")
     
     if not os.path.exists(db_file):
-        await status.edit("❌ DB file missing. Run index command first.")
+        await status.edit("❌ DB missing.")
         GLOBAL_TASK_RUNNING = False
         return
 
@@ -265,14 +271,13 @@ async def dual_forwarder(message, db_file, target_ref, limit=None):
     total_items = len(clean_data)
     
     if total_items == 0:
-        await status.edit("✅ Nothing new to forward (All duplicates).")
+        await status.edit("✅ No new files.")
         GLOBAL_TASK_RUNNING = False
         return
 
     try:
         tgt = await resolve_chat(bot1, target_ref)
         tgt_id = tgt.id
-        # Ensure Bot 2 is also in chat
         await join_sync(bot2, target_ref)
     except Exception as e:
         await status.edit(f"❌ Target Error: {e}")
@@ -282,8 +287,8 @@ async def dual_forwarder(message, db_file, target_ref, limit=None):
     list_1 = clean_data[0::2]
     list_2 = clean_data[1::2]
 
-    await status.edit(f"⚡ **Dual-Core Engine Started**\nTasks: {total_items}\nBoss: {len(list_1)} | Worker: {len(list_2)}")
-
+    await status.edit(f"⚡ **Started!** Boss: {len(list_1)} | Worker: {len(list_2)}")
+    
     progress = {"Boss": 0, "Worker": 0}
     
     async def update_ui():
@@ -292,7 +297,7 @@ async def dual_forwarder(message, db_file, target_ref, limit=None):
             if done >= total_items: break
             try:
                 await status.edit(
-                    f"⚡ **Forwarding...**\nDone: `{done} / {total_items}`\nBoss: {progress['Boss']} | Worker: {progress['Worker']}",
+                    f"⚡ **Progress:** `{done}/{total_items}`\nBoss: {progress['Boss']} | Worker: {progress['Worker']}",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 STOP", callback_data="stop")]])
                 )
             except: pass
@@ -305,137 +310,107 @@ async def dual_forwarder(message, db_file, target_ref, limit=None):
     await asyncio.gather(task1, task2)
     GLOBAL_TASK_RUNNING = False
     await ui_task
-    
-    await status.edit(f"✅ **Mission Complete!**\nForwarded: `{progress['Boss'] + progress['Worker']}` files.")
+    await status.edit("✅ **Completed!**")
 
 # --- COMMANDS ---
 
-# NOTE: filters.user(ADMIN_ID) is the FIX for not responding
 @bot1.on_message(filters.command("start") & filters.user(ADMIN_ID))
 async def start_msg(_, m):
-    txt = (
-        "🔥 **DUAL-CORE BOT ONLINE** 🔥\n\n"
-        "**Sync Command:**\n"
-        "`/sync <channel>` - Join both bots & Sync Data\n\n"
-        "**Movies:**\n"
-        "`/index <channel>` - Index Movies\n"
-        "`/index_target <channel>` - Sync Target (Movies)\n\n"
-        "**Full Backup:**\n"
-        "`/index_full <channel>` - Index All\n"
-        "`/index_target_full <channel>` - Sync Target (All)\n\n"
-        "**Forwarding:**\n"
-        "`/forward <type> <target> [limit]`\n"
-        "Types: `movie`, `full`, `series`, `bad`\n\n"
-        "`/stop` - Stop Process\n"
-        "`/ping` - Check Status"
+    await m.reply(
+        "🔥 **DUAL-CORE BOT ONLINE**\n"
+        "`/sync @channel` - Join & Sync\n"
+        "`/index @channel` - Index Movie\n"
+        "`/index_target @channel` - Target Movie\n"
+        "`/index_full @channel` - Index All\n"
+        "`/index_target_full @channel` - Target All\n"
+        "`/forward movie @target`\n"
+        "`/forward full @target`\n"
+        "`/stop` - Stop"
     )
-    await m.reply(txt)
 
 @bot1.on_message(filters.command("stop") & filters.user(ADMIN_ID))
 async def stop_handler(_, m):
     global GLOBAL_TASK_RUNNING
     GLOBAL_TASK_RUNNING = False
-    await m.reply("🛑 **Stopping All Engines...**")
+    await m.reply("🛑 Stopping...")
 
 @bot1.on_callback_query(filters.regex("stop"))
 async def stop_cb(_, q):
     global GLOBAL_TASK_RUNNING
     if q.from_user.id != ADMIN_ID: return
     GLOBAL_TASK_RUNNING = False
-    await q.answer("Stopping...")
-    await q.message.edit("🛑 **STOPPED BY USER**")
+    await q.answer()
+    await q.message.edit("🛑 **STOPPED**")
 
 @bot1.on_message(filters.command("ping") & filters.user(ADMIN_ID))
 async def ping_handler(_, m):
-    me1 = await bot1.get_me()
-    me2 = await bot2.get_me()
-    await m.reply(f"✅ **Pong!**\nBot 1: `{me1.first_name}`\nBot 2: `{me2.first_name}`")
+    try:
+        me1 = await bot1.get_me()
+        me2 = await bot2.get_me()
+        await m.reply(f"✅ Bot1: `{me1.first_name}`\n✅ Bot2: `{me2.first_name}`")
+    except Exception as e:
+        await m.reply(f"⚠️ Error: {e}")
 
-# --- NEW SYNC COMMAND ---
 @bot1.on_message(filters.command("sync") & filters.user(ADMIN_ID))
 async def sync_command(c, m):
-    if len(m.command) < 2:
-        return await m.reply("Usage: `/sync @channel_link`\n\nYe dono bots ko join karwayega aur DB update karega.")
-    
+    if len(m.command) < 2: return await m.reply("Usage: `/sync @channel`")
     chat_ref = m.command[1]
-    status = await m.reply(f"♻️ **Syncing started for:** `{chat_ref}`")
-    
+    status = await m.reply("♻️ **Syncing...**")
     try:
-        # 1. Join Boss
-        await status.edit("1️⃣ Boss joining chat...")
         await join_sync(bot1, chat_ref)
-        
-        # 2. Join Worker
-        await status.edit("2️⃣ Worker joining chat...")
         await join_sync(bot2, chat_ref)
-        
-        # 3. Index Content (Target Sync)
-        await status.edit("3️⃣ Reading chat content to prevent duplicates...")
-        # Use target_indexer logic here
         await target_indexer(c, m, chat_ref, DB_FILES["full_target"])
-        
     except Exception as e:
-        await status.edit(f"❌ Sync Failed: {e}")
+        await status.edit(f"❌ Failed: {e}")
 
-# --- INDEX COMMANDS ---
 @bot1.on_message(filters.command("index") & filters.user(ADMIN_ID))
-async def cmd_idx_movie(c, m):
-    await generic_indexer(c, m, m.command[1], DB_FILES["movie_index"], mode="movie")
+async def cmd_idx_movie(c, m): await generic_indexer(c, m, m.command[1], DB_FILES["movie_index"], mode="movie")
 
 @bot1.on_message(filters.command("index_target") & filters.user(ADMIN_ID))
-async def cmd_idx_tgt_movie(c, m):
-    await target_indexer(c, m, m.command[1], DB_FILES["movie_target"])
+async def cmd_idx_tgt_movie(c, m): await target_indexer(c, m, m.command[1], DB_FILES["movie_target"])
 
 @bot1.on_message(filters.command("index_full") & filters.user(ADMIN_ID))
-async def cmd_idx_full(c, m):
-    await generic_indexer(c, m, m.command[1], DB_FILES["full_index"], mode="all")
+async def cmd_idx_full(c, m): await generic_indexer(c, m, m.command[1], DB_FILES["full_index"], mode="all")
 
 @bot1.on_message(filters.command("index_target_full") & filters.user(ADMIN_ID))
-async def cmd_idx_tgt_full(c, m):
-    await target_indexer(c, m, m.command[1], DB_FILES["full_target"])
-
-@bot1.on_message(filters.command("index_series") & filters.user(ADMIN_ID))
-async def cmd_idx_series(c, m):
-    await generic_indexer(c, m, m.command[1], DB_FILES["series_index"], mode="series")
-
-@bot1.on_message(filters.command("find_bad") & filters.user(ADMIN_ID))
-async def cmd_find_bad(c, m):
-    await generic_indexer(c, m, m.command[1], DB_FILES["bad_quality"], mode="bad")
+async def cmd_idx_tgt_full(c, m): await target_indexer(c, m, m.command[1], DB_FILES["full_target"])
 
 @bot1.on_message(filters.command("forward") & filters.user(ADMIN_ID))
 async def cmd_forward(_, m):
-    if len(m.command) < 3:
-        return await m.reply("❌ Usage: `/forward <type> <target> [limit]`")
-    
+    if len(m.command) < 3: return await m.reply("Usage: `/forward <type> <target>`")
+    db_map = {"movie": DB_FILES["movie_index"], "full": DB_FILES["full_index"]}
     db_type = m.command[1].lower()
-    db_map = {
-        "movie": DB_FILES["movie_index"], "full": DB_FILES["full_index"],
-        "series": DB_FILES["series_index"], "bad": DB_FILES["bad_quality"]
-    }
-    if db_type not in db_map: return await m.reply("❌ Invalid Type.")
-    
+    if db_type not in db_map: return await m.reply("❌ Use `movie` or `full`")
     await dual_forwarder(m, db_map[db_type], m.command[2], m.command[3] if len(m.command) > 3 else None)
 
 # --- MAIN EXECUTION ---
 async def main():
-    print("🤖 Starting Boss Session...")
-    await bot1.start()
-    print("👷 Starting Worker Session...")
-    await bot2.start()
-    
-    # Notify Admin that Bot is Alive (Troubleshooting Fix)
+    print("🤖 Starting Bots...")
+    # Error handling during startup
     try:
-        await bot1.send_message(ADMIN_ID, "✅ **Bot Restarted & Ready!**\nSend `/start` to begin.")
+        await bot1.start()
     except Exception as e:
-        print(f"⚠️ Could not send startup message to Admin: {e}")
+        print(f"❌ BOSS BOT FAILED: {e}")
+        print("💡 Check SESSION_STRING in Render.")
+        sys.exit(1)
+
+    try:
+        await bot2.start()
+    except Exception as e:
+        print(f"⚠️ WORKER BOT FAILED: {e}")
+        print("💡 Continuing with Boss only...")
+
+    # Notify Admin
+    try:
+        await bot1.send_message(ADMIN_ID, "✅ **Bot Restarted!**\nSend `/start`")
+    except:
+        print("⚠️ Failed to send start message.")
 
     load_duplicates()
-    print("🔥 Dual-Core Bot Ready! Waiting for commands...")
+    print("🔥 Ready!")
     await idle()
-    
     await bot1.stop()
     await bot2.stop()
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(main())
+    asyncio.get_event_loop().run_until_complete(main())
