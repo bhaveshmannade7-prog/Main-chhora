@@ -14,11 +14,13 @@ API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
-# EXTENSION: Multi-Session Support (3 Sessions)
+# EXTENSION: Multi-Session Support (5 Sessions)
 # Smart Fallback: Checks SESSION1, then SESSION_STRING for backward compatibility
 SESSION1 = os.getenv("SESSION1", os.getenv("SESSION_STRING"))
 SESSION2 = os.getenv("SESSION2")
 SESSION3 = os.getenv("SESSION3")
+SESSION4 = os.getenv("SESSION4")
+SESSION5 = os.getenv("SESSION5")
 
 if not SESSION1:
     print("CRITICAL ERROR: SESSION1 or SESSION_STRING is missing!")
@@ -29,36 +31,37 @@ app_web = Flask(__name__)
 
 @app_web.route('/')
 def home():
-    return "✅ Ultra Bot V3 is Running! System Status: Nominal."
+    return "✅ Ultra Bot V4 (5-Core) is Running! System Status: Nominal."
 
 def run_web_server():
     port = int(os.getenv("PORT", 8080))
     app_web.run(host="0.0.0.0", port=port)
 
 def start_web_server():
-    # AUTO-DETECT: Server vs Mobile
+    # AUTO-DETECT: Server vs Mobile (Nothing Phone 2a Optimization)
     # If PORT or RENDER env exists, assume Cloud Server.
+    # On Mobile/Termux, these usually don't exist, so we skip the server to save Battery/RAM.
     if os.getenv("PORT") or os.getenv("RENDER"):
         print("🌍 Cloud Deployment Detected: Starting Web Server...")
         t = Thread(target=run_web_server)
         t.start()
     else:
-        print("📱 Mobile/Termux Mode Detected: Web Server Disabled (Saving RAM).")
+        print("📱 Mobile/Termux Mode Detected: Web Server Disabled (Battery/RAM Saver Mode).")
 
-# --- ADVANCED CLIENT SETUP (MULTI-SESSION) ---
+# --- ADVANCED CLIENT SETUP (5 SESSIONS) ---
 # Primary Client (Session 1) - Commander
 app = Client(
-    "advanced_user_bot_1", 
+    "advanced_bot_1", 
     api_id=API_ID, 
     api_hash=API_HASH, 
     session_string=SESSION1, 
-    in_memory=True,
+    in_memory=True, # Optimized for RAM
     ipv6=False
 )
 
 # Secondary Client (Session 2) - Worker
 app2 = Client(
-    "advanced_user_bot_2", 
+    "advanced_bot_2", 
     api_id=API_ID, 
     api_hash=API_HASH, 
     session_string=SESSION2 if SESSION2 else SESSION1, 
@@ -68,7 +71,7 @@ app2 = Client(
 
 # Tertiary Client (Session 3) - Worker
 app3 = Client(
-    "advanced_user_bot_3", 
+    "advanced_bot_3", 
     api_id=API_ID, 
     api_hash=API_HASH, 
     session_string=SESSION3 if SESSION3 else SESSION1, 
@@ -76,10 +79,32 @@ app3 = Client(
     ipv6=False
 )
 
-# Active Client Manager
+# Quaternary Client (Session 4) - Worker
+app4 = Client(
+    "advanced_bot_4", 
+    api_id=API_ID, 
+    api_hash=API_HASH, 
+    session_string=SESSION4 if SESSION4 else SESSION1, 
+    in_memory=True,
+    ipv6=False
+)
+
+# Quinary Client (Session 5) - Worker
+app5 = Client(
+    "advanced_bot_5", 
+    api_id=API_ID, 
+    api_hash=API_HASH, 
+    session_string=SESSION5 if SESSION5 else SESSION1, 
+    in_memory=True,
+    ipv6=False
+)
+
+# Active Client Manager (Dynamic List)
 ALL_CLIENTS = [app]
 if SESSION2: ALL_CLIENTS.append(app2)
 if SESSION3: ALL_CLIENTS.append(app3)
+if SESSION4: ALL_CLIENTS.append(app4)
+if SESSION5: ALL_CLIENTS.append(app5)
 
 # --- GLOBAL SETTINGS (STRICTLY UPGRADED) ---
 GLOBAL_TASK_RUNNING = False
@@ -271,14 +296,14 @@ async def indexing_engine(client, message, chat_ref, db_file, mode="all"):
 
 async def forwarding_engine(message, source_db, target_db, destination_ref, limit=None, mode_copy=True):
     """
-    🚀 ULTRA SMART FORWARDING ENGINE (ISOLATED FLOODWAIT)
-    - Partitions data exactly between available sessions.
-    - If Session A hits FloodWait, Session B and C KEEP RUNNING.
+    🚀 ULTRA SMART 5-CORE FORWARDING ENGINE
+    - Dynamically splits data among 1, 2, 3, 4, or 5 active sessions.
+    - If Session A hits FloodWait, Sessions B, C, D, E CONTINUE running.
     """
     global GLOBAL_TASK_RUNNING
     GLOBAL_TASK_RUNNING = True
     
-    status = await message.reply("⚙️ **Initializing Multi-Session Engine...**\nVerifying Safety Protocols...")
+    status = await message.reply("⚙️ **Initializing 5-Core Engine...**\nVerifying Safety Protocols...")
     
     # 1. Validation
     if not os.path.exists(source_db):
@@ -323,16 +348,16 @@ async def forwarding_engine(message, source_db, target_db, destination_ref, limi
     if not final_list:
         return await status.edit(f"✅ **Job Done!**\nNo new files to forward.\nDuplicates Skipped: `{skipped_count}`")
 
-    # 6. PARTITIONING (SPLITTING DATA)
+    # 6. PARTITIONING (SPLITTING DATA FOR 5 SESSIONS)
     total_items = len(final_list)
     active_sessions = [c for c in ALL_CLIENTS if c.is_connected]
     num_sessions = len(active_sessions)
     
-    # Calculate Chunk Size
+    # Calculate Chunk Size (Equal Distribution)
     chunk_size = math.ceil(total_items / num_sessions)
     chunks = [final_list[i:i + chunk_size] for i in range(0, total_items, chunk_size)]
     
-    # Pad chunks if necessary
+    # Pad chunks if necessary (e.g. if 5 sessions but small data)
     while len(chunks) < len(active_sessions):
         chunks.append([])
 
@@ -342,7 +367,7 @@ async def forwarding_engine(message, source_db, target_db, destination_ref, limi
         f"🤖 Active Bots: `{num_sessions}`\n"
         f"🗑️ Duplicates Removed: `{skipped_count}`\n"
         f"🛡️ Safety Mode: `{BATCH_SIZE} msgs` -> `{BREAK_TIME}s break`\n\n"
-        f"⚡ _All sessions running in parallel. If one waits, others continue._"
+        f"⚡ _Running on up to 5 parallel threads._"
     )
 
     # SHARED STATS (Atomic Update)
@@ -413,13 +438,13 @@ async def forwarding_engine(message, source_db, target_db, destination_ref, limi
 @app.on_message(filters.command("start") & filters.create(only_admin))
 async def start_msg(_, m):
     txt = (
-        "🤖 **Ultra Advanced Bot V3 (Manager)**\n"
-        "_(Multi-Session | Partitioning | Smart Safety)_\n\n"
+        "🤖 **Ultra Advanced Bot V4 (5-Core Edition)**\n"
+        "_(Designed for Render & Nothing Phone 2a)_\n\n"
         "**📚 Indexing**\n"
         "`/index <channel>` - Source Movie Indexing.\n"
         "`/index_full <channel>` - Source Full Indexing.\n"
         "`/index_target <channel>` - Target Duplicate Check.\n\n"
-        "**🚀 Forwarding (3 Sessions Parallel)**\n"
+        "**🚀 Forwarding (5 Sessions Parallel)**\n"
         "`/forward_movie <target> [limit]`\n"
         "`/forward_full <target> [limit]`\n\n"
         "**🛠️ Maintenance**\n"
@@ -469,7 +494,7 @@ async def stats_cmd(_, m):
     active = [c.name for c in ALL_CLIENTS if c.is_connected]
     report += f"\n**🤖 Bot Status:**\n"
     report += f"Running: `{GLOBAL_TASK_RUNNING}`\n"
-    report += f"Sessions: `{len(active)} Active`\n"
+    report += f"Active Cores: `{len(active)}/5`\n"
     report += f"Safety: `{BATCH_SIZE} msgs` -> `{BREAK_TIME}s break`"
 
     await m.reply(report)
@@ -514,7 +539,7 @@ async def sync_cmd(_, m):
             if client.is_connected:
                 async for dialog in client.get_dialogs():
                     count += 1
-        await msg.edit(f"✅ **Sync Complete!**\nFound `{count}` chats across sessions.")
+        await msg.edit(f"✅ **Sync Complete!**\nFound `{count}` chats across {len(ALL_CLIENTS)} sessions.")
     except Exception as e:
         await msg.edit(f"❌ Sync Error: {e}")
 
@@ -522,7 +547,7 @@ async def sync_cmd(_, m):
 async def stop_cmd(_, m):
     global GLOBAL_TASK_RUNNING
     GLOBAL_TASK_RUNNING = False
-    await m.reply("🛑 **Emergency Stop!**\nAll sessions halting after current operation.")
+    await m.reply("🛑 **Emergency Stop!**\nAll 5 sessions halting after current operation.")
 
 # --- INDEX HANDLERS ---
 
@@ -562,9 +587,9 @@ async def cmd_fwd_full(c, m):
 
 # --- MAIN RUNNER ---
 if __name__ == "__main__":
-    print("🤖 Ultra Bot V3 Initializing...")
+    print("🤖 Ultra Bot V4 (5-Session) Initializing...")
     
-    # 1. Web Server (Conditional)
+    # 1. Web Server (Conditional for Render/Mobile)
     start_web_server() 
 
     # 2. Start Multi-Sessions
